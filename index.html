@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="名刺管理">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self';">
+  <title>名刺管理</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>名刺管理</h1>
+      <p class="sub">端末内保存・外部DB不使用</p>
+    </div>
+    <button id="btnNew" class="primary">＋ 登録</button>
+  </header>
+
+  <main>
+    <section id="viewList" class="view active">
+      <div class="search-box">
+        <input id="searchInput" type="search" placeholder="会社名・氏名・タグ・メモなど">
+      </div>
+      <div class="toolbar">
+        <select id="categoryFilter">
+          <option value="">すべての分類</option>
+        </select>
+        <select id="sortSelect">
+          <option value="updated_desc">更新日の新しい順</option>
+          <option value="company_asc">会社名順</option>
+          <option value="name_asc">氏名順</option>
+        </select>
+      </div>
+      <div id="summary" class="summary"></div>
+      <div id="cardList" class="card-list"></div>
+      <div id="emptyState" class="empty hidden">登録された名刺はありません。</div>
+    </section>
+
+    <section id="viewEdit" class="view">
+      <div class="section-head">
+        <button id="btnBack" class="ghost">← 戻る</button>
+        <h2 id="editTitle">名刺登録</h2>
+      </div>
+
+      <div class="panel">
+        <label class="file-label">
+          名刺画像を撮影・選択
+          <input id="imageInput" type="file" accept="image/*" capture="environment">
+        </label>
+        <img id="imagePreview" class="preview hidden" alt="名刺画像プレビュー">
+        <div class="row">
+          <button id="btnOCR" class="secondary" type="button">端末内OCR</button>
+          <span id="ocrStatus" class="status"></span>
+        </div>
+        <small>OCRはvendor/tessdataにローカルファイルを配置した場合のみ動作します。画像は外部へ送信しません。</small>
+      </div>
+
+      <form id="cardForm" autocomplete="off">
+        <input id="cardId" type="hidden">
+
+        <div class="grid">
+          <label>会社名<input id="company" type="text"></label>
+          <label>会社名かな<input id="companyKana" type="text"></label>
+          <label>姓<input id="lastName" type="text"></label>
+          <label>名<input id="firstName" type="text"></label>
+          <label>氏名かな<input id="nameKana" type="text"></label>
+          <label>部署<input id="department" type="text"></label>
+          <label>役職<input id="position" type="text"></label>
+          <label>固定電話<input id="phone" type="tel"></label>
+          <label>携帯電話<input id="mobile" type="tel"></label>
+          <label>メール<input id="email" type="email"></label>
+          <label>郵便番号<input id="postalCode" type="text"></label>
+          <label class="wide">住所<input id="address" type="text"></label>
+          <label class="wide">Webサイト<input id="website" type="url"></label>
+          <label>分類
+            <select id="category"></select>
+          </label>
+          <label class="wide">タグ（カンマ区切り）
+            <input id="tags" type="text" placeholder="研削盤, PCD, 自動化">
+          </label>
+          <label class="wide">メモ
+            <textarea id="memo" rows="5" placeholder="いつ、どこで、何について話したか"></textarea>
+          </label>
+          <label class="check wide">
+            <input id="saveImage" type="checkbox">
+            名刺画像も端末内に保存する
+          </label>
+        </div>
+
+        <div class="form-actions">
+          <button id="btnSave" class="primary" type="submit">保存</button>
+          <button id="btnDelete" class="danger hidden" type="button">削除</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="viewSettings" class="view">
+      <div class="section-head">
+        <button id="btnSettingsBack" class="ghost">← 戻る</button>
+        <h2>設定・バックアップ</h2>
+      </div>
+
+      <div class="panel">
+        <h3>データ</h3>
+        <div id="stats" class="stats"></div>
+        <div class="stack">
+          <button id="btnExportCsv" class="secondary">CSVバックアップ</button>
+          <button id="btnExportJson" class="secondary">JSON完全バックアップ</button>
+          <label class="file-label secondary">
+            JSONから復元
+            <input id="importJson" type="file" accept=".json,application/json">
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>既定設定</h3>
+        <label class="check">
+          <input id="defaultSaveImage" type="checkbox">
+          名刺画像を保存する
+        </label>
+      </div>
+
+      <div class="panel">
+        <h3>分類</h3>
+        <textarea id="categorySettings" rows="8"></textarea>
+        <small>1行につき1分類。保存すると登録画面と絞り込みに反映されます。</small>
+        <button id="btnSaveSettings" class="primary">設定を保存</button>
+      </div>
+
+      <div class="panel warning-panel">
+        <h3>全データ削除</h3>
+        <p>この端末内の名刺データをすべて削除します。元に戻せません。</p>
+        <button id="btnDeleteAll" class="danger">全データ削除</button>
+      </div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button id="navCards" class="nav-active">名刺</button>
+    <button id="navNew">＋登録</button>
+    <button id="navSettings">設定</button>
+  </nav>
+
+  <script src="./js/db.js"></script>
+  <script src="./js/backup.js"></script>
+  <script src="./js/ocr.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
