@@ -1,5 +1,5 @@
 
-const CACHE = "business-card-pwa-v1";
+const CACHE = "business-card-pwa-v2-ocr";
 const APP_FILES = [
   "./",
   "./index.html",
