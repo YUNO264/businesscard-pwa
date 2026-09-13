@@ -1,69 +1,192 @@
 const CardPreprocess = (() => {
-  const OPENCV_PATH = "./vendor/opencv.js";
+  const LOCAL_OPENCV_PATH = "./vendor/opencv.js";
+  const OPENCV_CDN_URLS = [
+    "https://docs.opencv.org/4.13.0/opencv.js",
+    "https://docs.opencv.org/4.12.0/opencv.js",
+    "https://cdn.jsdelivr.net/npm/opencv-browser@1.0.0/opencv.js"
+  ];
+
+  let cvPromise = null;
+  let loadedSource = "";
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   async function fileExists(path) {
     try {
-      let r = await fetch(path, { method: "HEAD", cache: "no-store" });
-      if (r.ok) return true;
-      r = await fetch(path, { method: "GET", cache: "no-store" });
+      const r = await fetch(path, { method: "GET", cache: "no-store" });
       return r.ok;
     } catch {
       return false;
     }
   }
 
-  async function waitForCv(timeoutMs = 20000) {
+  function normalizeCv(value) {
+    if (value?.Mat) return value;
+    if (window.cv?.Mat) return window.cv;
+    if (window.Module?.Mat) return window.Module;
+    return null;
+  }
+
+  async function unwrapCv(timeoutMs = 30000) {
     const started = Date.now();
 
-    if (window.OpenCVReady) {
-      try {
-        const timeout = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("OpenCV.js初期化タイムアウト")), timeoutMs)
-        );
-        const cvReady = await Promise.race([window.OpenCVReady, timeout]);
-        if (cvReady?.Mat) return cvReady;
-      } catch {
-        // Fall through to polling. Some OpenCV builds set global cv directly.
-      }
-    }
-
     while (Date.now() - started < timeoutMs) {
-      if (window.cv instanceof Promise) {
-        try {
+      try {
+        if (window.cv instanceof Promise) {
           const resolved = await window.cv;
-          if (resolved?.Mat) {
-            window.cv = resolved;
-            window.__resolveOpenCVReady?.(resolved);
-            return resolved;
+          const normalized = normalizeCv(resolved);
+          if (normalized) {
+            window.cv = normalized;
+            return normalized;
           }
-        } catch {}
-      }
-      if (window.cv?.Mat) {
-        window.__resolveOpenCVReady?.(window.cv);
-        return window.cv;
-      }
-      if (window.Module?.Mat) {
-        window.cv = window.Module;
-        window.__resolveOpenCVReady?.(window.cv);
-        return window.cv;
-      }
+        }
+
+        const normalized = normalizeCv(window.cv) || normalizeCv(window.Module);
+        if (normalized) return normalized;
+      } catch {}
+
       await sleep(80);
     }
-    throw new Error("OpenCV.jsを初期化できません。SETUP_OCR_FINAL.batを再実行してください。");
+
+    throw new Error("OpenCV.jsは読み込まれましたが、cv.Matが初期化されませんでした。");
+  }
+
+  function injectScript(src, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+      const existing = [...document.scripts].find(s => s.src === new URL(src, location.href).href);
+      if (existing) {
+        resolve();
+        return;
+      }
+
+      const oldModule = window.Module || {};
+      let runtimeResolved = false;
+
+      const runtimePromise = new Promise(runtimeResolve => {
+        const oldRuntime = oldModule.onRuntimeInitialized;
+        window.Module = {
+          ...oldModule,
+          onRuntimeInitialized() {
+            try { oldRuntime?.(); } catch {}
+            runtimeResolved = true;
+            runtimeResolve();
+          }
+        };
+      });
+
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+
+      const timer = setTimeout(() => {
+        reject(new Error(`OpenCV.js読込タイムアウト: ${src}`));
+      }, timeoutMs);
+
+      script.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error(`OpenCV.js読込失敗: ${src}`));
+      };
+
+      script.onload = async () => {
+        try {
+          // Current official OpenCV builds may expose `cv` as a Promise.
+          // Older builds use Module.onRuntimeInitialized.
+          if (!runtimeResolved) {
+            await Promise.race([runtimePromise, sleep(1200)]);
+          }
+          await unwrapCv(20000);
+          clearTimeout(timer);
+          resolve();
+        } catch (e) {
+          clearTimeout(timer);
+          reject(e);
+        }
+      };
+
+      document.head.appendChild(script);
+    });
+  }
+
+  async function loadCv() {
+    if (normalizeCv(window.cv) || normalizeCv(window.Module)) {
+      return normalizeCv(window.cv) || normalizeCv(window.Module);
+    }
+
+    if (cvPromise) return cvPromise;
+
+    cvPromise = (async () => {
+      const candidates = [];
+
+      if (await fileExists(LOCAL_OPENCV_PATH)) {
+        candidates.push({ src: LOCAL_OPENCV_PATH, label: "local" });
+      }
+
+      for (const url of OPENCV_CDN_URLS) {
+        candidates.push({ src: url, label: "CDN" });
+      }
+
+      let lastError = null;
+
+      for (const candidate of candidates) {
+        try {
+          await injectScript(candidate.src);
+          const c = await unwrapCv();
+          loadedSource = candidate.label === "local"
+            ? "local"
+            : candidate.src;
+          return c;
+        } catch (e) {
+          lastError = e;
+          // Remove a failed external script so the next URL can be tried.
+          for (const s of [...document.scripts]) {
+            if (s.src === new URL(candidate.src, location.href).href) {
+              try { s.remove(); } catch {}
+            }
+          }
+          window.cv = undefined;
+          // Preserve Module only as a fresh shell for the next retry.
+          window.Module = {};
+        }
+      }
+
+      throw lastError || new Error("OpenCV.jsを読み込めませんでした。");
+    })();
+
+    try {
+      return await cvPromise;
+    } catch (e) {
+      cvPromise = null;
+      throw e;
+    }
+  }
+
+  async function waitForCv(timeoutMs = 30000) {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("OpenCV.js初期化タイムアウト")), timeoutMs)
+    );
+    return Promise.race([loadCv(), timeout]);
   }
 
   async function selfCheck() {
-    const file = await fileExists(OPENCV_PATH);
-    let runtime = false;
-    if (file) {
-      try {
-        const c = await waitForCv(5000);
-        runtime = !!c?.Mat;
-      } catch {}
+    const localFile = await fileExists(LOCAL_OPENCV_PATH);
+
+    try {
+      const c = await waitForCv(30000);
+      return {
+        localFile,
+        runtime: !!c?.Mat,
+        source: loadedSource || (localFile ? "local" : "CDN"),
+        ready: !!c?.Mat
+      };
+    } catch (e) {
+      return {
+        localFile,
+        runtime: false,
+        source: loadedSource || "",
+        ready: false,
+        error: e.message
+      };
     }
-    return { file, runtime, ready: file && runtime };
   }
 
   function loadImage(dataUrl) {
@@ -318,5 +441,5 @@ const CardPreprocess = (() => {
     }
   }
 
-  return { selfCheck, waitForCv, correctPerspective, OPENCV_PATH };
+  return { selfCheck, waitForCv, correctPerspective, LOCAL_OPENCV_PATH, OPENCV_CDN_URLS };
 })();

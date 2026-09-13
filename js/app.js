@@ -462,7 +462,7 @@ const App = (() => {
         const prepCheck = await CardPreprocess.selfCheck();
         if (!prepCheck.ready) {
           setOcrStep("preprocess","error","OpenCV.jsが使用できません");
-          throw new Error("画像補正用OpenCV.jsが未配置または未初期化です。SETUP_OCR_FINAL.batを実行してください。");
+          throw new Error(`画像補正用OpenCV.jsを初期化できません。${prepCheck.error || "ネット接続またはCSPを確認してください。"}`);
         }
 
         const corrected = await CardPreprocess.correctPerspective(currentImageData, message => {
@@ -554,7 +554,7 @@ const App = (() => {
     ]);
     const coreCount = Object.values(c.core || {}).filter(x => x && x.pair).length;
     $("ocrCheckResult").textContent =
-`OpenCV.js:    ${p.ready ? "OK" : "NG"}
+`OpenCV.js:    ${p.ready ? "OK" : "NG"}${p.ready ? ` (${p.source === "local" ? "local" : "CDN"})` : ""}
 Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
 Japanese:     ${c.jpn?.ok ? "OK" : "NG"}
