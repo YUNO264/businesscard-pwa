@@ -459,13 +459,7 @@ const App = (() => {
         $("ocrStatus").textContent = "名刺外周を検出して傾きを補正中…";
         $("correctionStatus").textContent = "外周検出中…";
 
-        const prepCheck = await CardPreprocess.selfCheck();
-        if (!prepCheck.ready) {
-          setOcrStep("preprocess","error","OpenCV.jsが使用できません");
-          throw new Error(`画像補正用OpenCV.jsを初期化できません。${prepCheck.error || "ネット接続またはCSPを確認してください。"}`);
-        }
-
-        const corrected = await CardPreprocess.correctPerspective(currentImageData, message => {
+        const corrected = await CardPreprocess.correctCardImage(currentImageData, message => {
           $("correctionStatus").textContent = message;
           $("ocrStatus").textContent = message;
         });
@@ -477,12 +471,17 @@ const App = (() => {
           $("correctedPreview").src = currentOcrImageData;
           $("correctedPreviewWrap").classList.remove("hidden");
           $("correctionStatus").textContent = corrected.message;
-          setOcrStep("preprocess","done","名刺外周から回転・台形補正完了");
+
+          if (corrected.method === "opencv-perspective") {
+            setOcrStep("preprocess","done","OpenCV: 外周4点・台形補正完了");
+          } else {
+            setOcrStep("preprocess","done","JS: 傾き回転補正完了");
+          }
         } else {
           $("correctedPreview").src = "";
           $("correctedPreviewWrap").classList.add("hidden");
           $("correctionStatus").textContent = corrected.message;
-          setOcrStep("preprocess","done","外周未検出・元画像を使用");
+          setOcrStep("preprocess","done","補正不要/元画像を使用");
         }
       } else {
         currentOcrImageData = currentImageData;
@@ -554,7 +553,9 @@ const App = (() => {
     ]);
     const coreCount = Object.values(c.core || {}).filter(x => x && x.pair).length;
     $("ocrCheckResult").textContent =
-`OpenCV.js:    ${p.ready ? "OK" : "NG"}${p.ready ? ` (${p.source === "local" ? "local" : "CDN"})` : ""}
+`OpenCV.js:    ${p.ready ? "OK" : "NG（任意）"}${p.ready ? ` (${p.source === "local" ? "local" : "CDN"})` : ""}
+JS傾き補正:   OK
+OpenCV詳細:   ${p.ready ? "4点透視補正を使用可能" : (p.error || "未初期化")}
 Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
 Japanese:     ${c.jpn?.ok ? "OK" : "NG"}
@@ -562,9 +563,9 @@ Japanese Vert: ${c.jpnVert?.ok ? "OK" : "NG"}
 English:      ${c.eng?.ok ? "OK" : "NG"}
 LSTM Core:    ${c.coreAll ? `OK (${coreCount}/3)` : `NG (${coreCount}/3)`}
 ------------------------
-総合判定:      ${c.ready && p.ready ? "外周補正＋OCR実行可能" : "必要資材不足"}
+総合判定:      ${c.ready ? (p.ready ? "OpenCV外周補正＋OCR実行可能" : "JS傾き補正＋OCR実行可能") : "OCR資材不足"}
 
-NGがある場合は SETUP_OCR_FINAL.bat を実行してください。`;
+Tesseract関連がNGの場合のみ SETUP_OCR_FINAL.bat を実行してください。OpenCV NGだけならOCRは実行できます。`;
   }
 
   async function openSettings() {
