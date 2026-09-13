@@ -55,6 +55,16 @@
         </label>
         <img id="imagePreview" class="preview hidden" alt="名刺画像プレビュー">
 
+        <label class="check ocr-correction-check">
+          <input id="autoCardCorrection" type="checkbox" checked>
+          OCR前に名刺外周を検出し、傾き・台形歪みを自動補正する
+        </label>
+        <div id="correctionStatus" class="correction-status">補正待機中</div>
+        <div id="correctedPreviewWrap" class="corrected-preview-wrap hidden">
+          <div class="corrected-preview-title">OCRへ渡す補正後画像</div>
+          <img id="correctedPreview" class="preview" alt="外周補正後の名刺画像">
+        </div>
+
         <div class="ocr-direction-row">
           <label>文字方向
             <select id="ocrDirection">
@@ -74,6 +84,7 @@
         <div class="ocr-progress">
           <div class="ocr-title">OCR状態</div>
           <div id="ocrSteps" class="ocr-steps">
+            <div data-step="preprocess">○ 名刺外周・傾き補正</div>
             <div data-step="api">○ Tesseract.js確認</div>
             <div data-step="worker">○ Worker起動</div>
             <div data-step="lang">○ 日本語・英語データ読込</div>
@@ -143,7 +154,7 @@
       </div>
 
       <div class="panel">
-        <h3>OCR自己診断</h3>
+        <h3>OCR・画像補正自己診断</h3>
         <button id="btnOcrCheck" class="secondary">OCR資材を確認</button>
         <pre id="ocrCheckResult" class="diagnostic">未確認</pre>
       </div>
@@ -190,10 +201,13 @@
     <button id="navSettings">設定</button>
   </nav>
 
-  <!-- 必ずocr.jsより前 -->
+  <!-- OpenCV bootstrap → OpenCV → Tesseract → app -->
+  <script src="./js/opencv-loader.js"></script>
+  <script src="./vendor/opencv.js"></script>
   <script src="./vendor/tesseract.min.js"></script>
   <script src="./js/db.js"></script>
   <script src="./js/backup.js"></script>
+  <script src="./js/preprocess.js"></script>
   <script src="./js/ocr.js"></script>
   <script src="./js/app.js"></script>
 </body>

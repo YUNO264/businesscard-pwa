@@ -1,7 +1,7 @@
-const CACHE = "business-card-pwa-final-v4-2";
+const CACHE = "business-card-pwa-final-v4-3";
 const APP_FILES = [
   "./","./index.html","./css/style.css",
-  "./js/app.js","./js/db.js","./js/backup.js","./js/ocr.js",
+  "./js/app.js","./js/db.js","./js/backup.js","./js/opencv-loader.js","./js/preprocess.js","./js/ocr.js",
   "./manifest.json","./icons/icon-192.png","./icons/icon-512.png",
   "./tessdata/jpn.traineddata.gz","./tessdata/eng.traineddata.gz"
 ];

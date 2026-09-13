@@ -5,6 +5,7 @@ const App = (() => {
   ];
 
   let currentImageData = null;
+  let currentOcrImageData = null;
   let currentImageFile = null;
   let currentOcrRegions = [];
   let currentOcrOrientation = "horizontal";
@@ -126,7 +127,12 @@ const App = (() => {
     $("imagePreview").classList.add("hidden");
     $("imagePreview").src = "";
     currentImageData = null;
+    currentOcrImageData = null;
     currentImageFile = null;
+    $("autoCardCorrection").checked = true;
+    $("correctionStatus").textContent = "補正待機中";
+    $("correctedPreview").src = "";
+    $("correctedPreviewWrap").classList.add("hidden");
     $("saveImage").checked = $("defaultSaveImage").checked;
     $("ocrStatus").textContent = "待機中";
     $("ocrRawText").value = "";
@@ -170,7 +176,14 @@ const App = (() => {
     renderOcrRegions();
     $("saveImage").checked = !!c.imageData;
     currentImageData = c.imageData || null;
+    currentOcrImageData = c.imageData || null;
     currentImageFile = null;
+    $("autoCardCorrection").checked = c.ocrCorrectionEnabled !== false;
+    $("correctionStatus").textContent = c.ocrCorrectionApplied
+      ? "保存済み画像は外周補正済みです。"
+      : "保存済み画像";
+    $("correctedPreview").src = "";
+    $("correctedPreviewWrap").classList.add("hidden");
     if (currentImageData) {
       $("imagePreview").onload = () => drawOcrOverlay(currentOcrRegions);
       $("imagePreview").src = currentImageData;
@@ -210,11 +223,13 @@ const App = (() => {
       ocrRawText: $("ocrRawText").value.trim(),
       ocrOrientation: currentOcrOrientation,
       ocrRequestedMode: $("ocrDirection")?.value || "auto",
+      ocrCorrectionEnabled: $("autoCardCorrection")?.checked !== false,
+      ocrCorrectionApplied: !!currentOcrImageData && currentOcrImageData !== currentImageData,
       ocrRegions: currentOcrRegions.map(r => ({
         id:r.id, text:r.text, bbox:{...r.bbox}, confidence:r.confidence,
         avgHeight:r.avgHeight, type:r.type, autoType:r.autoType, score:r.score
       })),
-      imageData: $("saveImage").checked ? currentImageData : null,
+      imageData: $("saveImage").checked ? (currentOcrImageData || currentImageData) : null,
       createdAt: existing?.createdAt || now,
       updatedAt: now
     };
@@ -250,7 +265,11 @@ const App = (() => {
     currentImageFile = file;
     const reader = new FileReader();
     reader.onload = async ev => {
-      currentImageData = await resizeImage(ev.target.result, 1600, 0.78);
+      currentImageData = await resizeImage(ev.target.result, 1600, 0.88);
+      currentOcrImageData = null;
+      $("correctionStatus").textContent = "補正待機中";
+      $("correctedPreview").src = "";
+      $("correctedPreviewWrap").classList.add("hidden");
       $("imagePreview").src = currentImageData;
       $("imagePreview").classList.remove("hidden");
     };
@@ -311,7 +330,7 @@ const App = (() => {
 
   function drawOcrOverlay(regions) {
     const canvas = $("ocrCanvas");
-    if (!regions?.length || !currentImageData) {
+    if (!regions?.length || !(currentOcrImageData || currentImageData)) {
       canvas.classList.add("hidden");
       return;
     }
@@ -342,7 +361,7 @@ const App = (() => {
       }
       canvas.classList.remove("hidden");
     };
-    img.src = currentImageData;
+    img.src = currentOcrImageData || currentImageData;
   }
 
   function applyRegionsToForm() {
@@ -433,6 +452,44 @@ const App = (() => {
     $("btnOCR").disabled = true;
 
     try {
+      let ocrInput = currentImageData || currentImageFile;
+
+      if ($("autoCardCorrection")?.checked && currentImageData) {
+        setOcrStep("preprocess","running","名刺外周を検出中");
+        $("ocrStatus").textContent = "名刺外周を検出して傾きを補正中…";
+        $("correctionStatus").textContent = "外周検出中…";
+
+        const prepCheck = await CardPreprocess.selfCheck();
+        if (!prepCheck.ready) {
+          setOcrStep("preprocess","error","OpenCV.jsが使用できません");
+          throw new Error("画像補正用OpenCV.jsが未配置または未初期化です。SETUP_OCR_FINAL.batを実行してください。");
+        }
+
+        const corrected = await CardPreprocess.correctPerspective(currentImageData, message => {
+          $("correctionStatus").textContent = message;
+          $("ocrStatus").textContent = message;
+        });
+
+        currentOcrImageData = corrected.dataUrl;
+        ocrInput = currentOcrImageData;
+
+        if (corrected.corrected) {
+          $("correctedPreview").src = currentOcrImageData;
+          $("correctedPreviewWrap").classList.remove("hidden");
+          $("correctionStatus").textContent = corrected.message;
+          setOcrStep("preprocess","done","名刺外周から回転・台形補正完了");
+        } else {
+          $("correctedPreview").src = "";
+          $("correctedPreviewWrap").classList.add("hidden");
+          $("correctionStatus").textContent = corrected.message;
+          setOcrStep("preprocess","done","外周未検出・元画像を使用");
+        }
+      } else {
+        currentOcrImageData = currentImageData;
+        setOcrStep("preprocess","done","画像補正なし");
+        $("correctionStatus").textContent = "画像補正はOFFです。";
+      }
+
       $("ocrStatus").textContent = "OCR資材を確認中…";
       setOcrStep("api","running","Tesseract.js確認中");
 
@@ -451,7 +508,7 @@ const App = (() => {
       $("ocrStatus").textContent = "Worker起動中…";
 
       const requestedMode = $("ocrDirection")?.value || "auto";
-      const layout = await LocalOCR.recognizeLayout(currentImageData || currentImageFile, info => {
+      const layout = await LocalOCR.recognizeLayout(ocrInput, info => {
         $("ocrStatus").textContent = info.text;
         if (info.stage === "api") setOcrStep("api","done",info.text);
         if (info.stage === "worker") setOcrStep("worker", info.text.includes("完了") ? "done":"running", info.text);
@@ -491,17 +548,21 @@ const App = (() => {
 
   async function runOcrSelfCheck() {
     $("ocrCheckResult").textContent = "確認中…";
-    const c = await LocalOCR.selfCheck();
+    const [c, p] = await Promise.all([
+      LocalOCR.selfCheck(),
+      CardPreprocess.selfCheck()
+    ]);
     const coreCount = Object.values(c.core || {}).filter(x => x && x.pair).length;
     $("ocrCheckResult").textContent =
-`Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
+`OpenCV.js:    ${p.ready ? "OK" : "NG"}
+Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
 Japanese:     ${c.jpn?.ok ? "OK" : "NG"}
 Japanese Vert: ${c.jpnVert?.ok ? "OK" : "NG"}
 English:      ${c.eng?.ok ? "OK" : "NG"}
 LSTM Core:    ${c.coreAll ? `OK (${coreCount}/3)` : `NG (${coreCount}/3)`}
 ------------------------
-総合判定:      ${c.ready ? "OCR実行可能" : "OCR資材不足"}
+総合判定:      ${c.ready && p.ready ? "外周補正＋OCR実行可能" : "必要資材不足"}
 
 NGがある場合は SETUP_OCR_FINAL.bat を実行してください。`;
   }
