@@ -1,3 +1,3 @@
-OCR JavaScript/WASM runtime is installed here by SETUP_OCR_V3.bat.
-After setup this folder contains tesseract.min.js, worker.min.js and core/*.wasm.js.
-Language files jpn/eng are already included under tessdata/.
+Run SETUP_OCR_FINAL.bat on Windows before publishing the PWA.
+It downloads Tesseract.js v7 and only the three LSTM core variants needed by this app.
+The setup also removes the unused non-LSTM variants left by older versions.

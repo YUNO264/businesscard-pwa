@@ -19,7 +19,7 @@
   <header class="app-header">
     <div>
       <h1>名刺管理</h1>
-      <p class="sub">端末内保存・ローカルOCR</p>
+      <p class="sub">端末内保存・座標付きローカルOCR</p>
     </div>
     <button id="btnNew" class="primary">＋ 登録</button>
   </header>
@@ -75,7 +75,18 @@
         <label class="ocr-raw-label">OCR全文
           <textarea id="ocrRawText" rows="9" placeholder="OCRが完了すると、認識した全文をここに表示します。"></textarea>
         </label>
-        <small>OCR全文と各項目への転記を分離しています。OCR結果が正しいのに項目が違う場合は、全文を修正して「OCR全文から再解析」を押してください。</small>
+        <small>通常は座標情報を使って項目を判定します。「OCR全文から再解析」は座標を使わない補助機能です。</small>
+
+        <section id="ocrLayoutPanel" class="ocr-layout-panel hidden">
+          <h3>レイアウト解析結果</h3>
+          <p class="layout-note">名刺上の位置を使って文字領域を分離しています。誤分類があればプルダウンで変更してから「分類をフォームに反映」を押してください。</p>
+          <canvas id="ocrCanvas" class="ocr-canvas"></canvas>
+          <div id="ocrRegionList" class="ocr-region-list"></div>
+          <div class="row">
+            <button id="btnApplyRegions" class="primary" type="button">分類をフォームに反映</button>
+            <button id="btnResetRegions" class="secondary" type="button">自動分類に戻す</button>
+          </div>
+        </section>
       </div>
 
       <form id="cardForm" autocomplete="off">

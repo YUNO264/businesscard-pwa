@@ -1,70 +1,59 @@
-# 名刺管理PWA
+# 名刺管理PWA 最終版（座標付き完全ローカルOCR）
 
-外部DBを使わず、名刺情報をブラウザのIndexedDBに保存するPWAです。
+## 主な改善点
 
-## 実装済み
-- 名刺登録・編集・削除
-- 会社名、氏名、部署、役職、電話、メール、分類、タグ、メモ等
-- 複数語AND検索
-- 分類フィルタ
-- 重複警告
-- 名刺画像の任意保存
-- CSVバックアップ
-- JSON完全バックアップ
-- JSON復元
-- 登録件数・概算容量表示
-- PWA / Service Worker
-- OCR呼び出し口（ローカルTesseract.js用）
+- Tesseract.js v7を端末内で実行
+- `blocks:true` の座標付きOCRを使用
+- OCR wordのbbox（X/Y座標）から、同じ高さでも横方向に離れた情報を別領域へ分割
+- 会社・氏名・部署・役職・住所・電話・携帯・FAX・メール・Webを内容＋位置で分類
+- OCR画像上に解析領域を表示
+- OCR後の各領域について分類をプルダウンで手修正可能
+- 修正した分類からフォームへ再転記可能
+- OCR全文からの座標なし再解析も補助機能として残す
+- 名刺画像・OCR結果・登録データを外部OCR APIへ送信しない
+- CSV / JSONバックアップ、IndexedDB検索、分類・タグ機能を継続
 
-## 重要なセキュリティ仕様
-名刺データはIndexedDBに保存し、このコードにはサーバー送信処理を実装していません。
-外部OCR API、Analytics、広告SDK、Firebase等も使用していません。
+## 初回セットアップ
 
-ただし、PWA本体をGitHub Pages等から配信する場合、ページを取得する通信自体は発生します。
-「名刺情報を外部に送信しない」ことと「インターネット通信が完全にゼロ」は別です。
+1. ZIPを展開
+2. `SETUP_OCR_FINAL.bat` をダブルクリック
+3. 最後に3つのcoreがすべて `OK` になることを確認
+4. VS Code + Live ServerなどでPWAを起動
+5. 設定 → OCR資材を確認
+6. `総合判定: OCR実行可能` を確認
+7. GitHub Pagesへ公開する場合は、セットアップ後の展開済みフォルダをコミット
 
-## 起動方法
-PWAは file:// ではService Workerが動かないため、HTTPSまたはlocalhostで起動してください。
+## GitHub容量対策
 
-開発PC:
-1. このフォルダをVS Codeで開く
-2. Live Server等で起動
-3. iPhoneから利用する場合はHTTPSで公開する
+旧版はTesseract coreを6種類保存していたためvendorが約43MBになりました。
+最終版はOEM=1（LSTM）専用とし、端末互換性のため以下3種類だけを保持します。
 
-## OCRを有効にする
-OCRはTesseract.jsのローカル同梱を前提としています。
-外部CDNを指定しないでください。
+- tesseract-core-lstm
+- tesseract-core-simd-lstm
+- tesseract-core-relaxedsimd-lstm
 
-配置例:
-vendor/
-  tesseract.min.js
-  worker.min.js
-  tesseract-core.wasm.js または使用バージョンに必要なcore一式
-tessdata/
-  jpn.traineddata.gz
-  eng.traineddata.gz
+`SETUP_OCR_FINAL.bat` は旧coreを一度削除してから、この3種類だけを再配置します。
 
-index.htmlの末尾で、js/ocr.jsより前に次を追加します。
+## OCRの使い方
 
-<script src="./vendor/tesseract.min.js"></script>
+1. ＋登録
+2. 名刺画像を撮影または選択
+3. 端末内OCR
+4. OCR完了後、「レイアウト解析結果」を確認
+5. 誤分類があれば、例えば「その他 → 部署」「住所 → 会社」のようにプルダウンを変更
+6. 「分類をフォームに反映」
+7. 最終確認して保存
 
-使用するTesseract.jsのバージョンによりcoreファイル名・初期化オプションが変わる場合があります。
-同一バージョンのdist/worker/coreを揃えてください。
+名刺は自由レイアウトのため100%完全自動判定は保証できません。
+そのため本版では「座標を使った自動判定＋誤分類だけ手修正」を実用上の最終仕様としています。
 
-## iPhoneでの注意
-- 「ホーム画面に追加」でPWAとして利用
-- SafariのWebサイトデータ削除でIndexedDBが消える可能性があるため、JSONバックアップを定期的に作成
-- 機種変更前にもJSONバックアップを作成
-- 名刺画像保存はデフォルトOFF推奨
+## セキュリティ
 
-## 推奨運用
-1. 名刺を撮影
-2. OCR（有効化後）
-3. OCR結果を人が確認
-4. 分類・タグ・メモを追加
-5. 保存
-6. 月1回程度JSON完全バックアップ
+CSPは `connect-src 'self'` を維持しています。
+Tesseractのworker/core/langPathもすべて同一PWA内を参照します。
+`wasm-unsafe-eval` はTesseract WebAssemblyのコンパイルに必要な範囲でのみ許可しています。
 
-## バックアップの違い
-CSV: Excel閲覧・一覧利用向け。画像は含みません。
-JSON: アプリ完全復元向け。画像保存をONにした名刺は画像も含みます。
+## 旧版から更新する場合
+
+Service Workerの旧キャッシュが残ることがあります。
+旧PWAを削除し、対象サイトのブラウザデータを消してから最終版を開くことを推奨します。

@@ -6,6 +6,7 @@ const App = (() => {
 
   let currentImageData = null;
   let currentImageFile = null;
+  let currentOcrRegions = [];
   let cards = [];
   let categories = [...DEFAULT_CATEGORIES];
 
@@ -41,6 +42,8 @@ const App = (() => {
     $("imageInput").addEventListener("change", handleImage);
     $("btnOCR").onclick = runOCR;
     $("btnReanalyze").onclick = reanalyzeRaw;
+    $("btnApplyRegions").onclick = applyRegionsToForm;
+    $("btnResetRegions").onclick = resetRegionTypes;
     $("btnOcrCheck").onclick = runOcrSelfCheck;
 
     $("btnExportCsv").onclick = async () => Backup.exportCSV(await CardDB.getAllCards());
@@ -127,6 +130,8 @@ const App = (() => {
     $("ocrStatus").textContent = "待機中";
     $("ocrRawText").value = "";
     $("btnReanalyze").classList.add("hidden");
+    currentOcrRegions = [];
+    renderOcrRegions();
     resetOcrSteps();
     show("viewEdit");
   }
@@ -153,10 +158,13 @@ const App = (() => {
     $("memo").value = c.memo || "";
     $("ocrRawText").value = c.ocrRawText || "";
     $("btnReanalyze").classList.toggle("hidden", !$("ocrRawText").value);
+    currentOcrRegions = Array.isArray(c.ocrRegions) ? c.ocrRegions.map(r => ({...r, bbox:{...r.bbox}})) : [];
+    renderOcrRegions();
     $("saveImage").checked = !!c.imageData;
     currentImageData = c.imageData || null;
     currentImageFile = null;
     if (currentImageData) {
+      $("imagePreview").onload = () => drawOcrOverlay(currentOcrRegions);
       $("imagePreview").src = currentImageData;
       $("imagePreview").classList.remove("hidden");
     } else {
@@ -192,6 +200,10 @@ const App = (() => {
       tags: $("tags").value.split(/[,\n、]/).map(x => x.trim()).filter(Boolean),
       memo: $("memo").value.trim(),
       ocrRawText: $("ocrRawText").value.trim(),
+      ocrRegions: currentOcrRegions.map(r => ({
+        id:r.id, text:r.text, bbox:{...r.bbox}, confidence:r.confidence,
+        avgHeight:r.avgHeight, type:r.type, autoType:r.autoType, score:r.score
+      })),
       imageData: $("saveImage").checked ? currentImageData : null,
       createdAt: existing?.createdAt || now,
       updatedAt: now
@@ -250,6 +262,93 @@ const App = (() => {
     });
   }
 
+  const OCR_TYPE_LABELS = {
+    company:"会社", name:"氏名", department:"部署", position:"役職", address:"住所",
+    phone:"電話", mobile:"携帯", fax:"FAX", email:"メール", website:"Web", other:"その他"
+  };
+
+  function renderOcrRegions() {
+    const panel = $("ocrLayoutPanel");
+    if (!currentOcrRegions.length) {
+      panel.classList.add("hidden");
+      $("ocrRegionList").innerHTML = "";
+      const canvas = $("ocrCanvas");
+      canvas.width = 1; canvas.height = 1;
+      return;
+    }
+    panel.classList.remove("hidden");
+    const options = Object.entries(OCR_TYPE_LABELS).map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    $("ocrRegionList").innerHTML = currentOcrRegions
+      .sort((a,b) => a.bbox.y0-b.bbox.y0 || a.bbox.x0-b.bbox.x0)
+      .map(r => `<div class="ocr-region-row" data-region="${r.id}">
+        <select class="ocr-region-type">${options}</select>
+        <div class="ocr-region-text">${escapeHtml(r.text)}</div>
+        <div class="ocr-region-meta">信頼度 ${Math.round(r.confidence || 0)}%</div>
+      </div>`).join("");
+
+    document.querySelectorAll(".ocr-region-row").forEach(row => {
+      const r = currentOcrRegions.find(x => x.id === row.dataset.region);
+      const sel = row.querySelector("select");
+      sel.value = r?.type || "other";
+      sel.onchange = () => {
+        if (r) r.type = sel.value;
+        drawOcrOverlay(currentOcrRegions);
+      };
+    });
+    drawOcrOverlay(currentOcrRegions);
+  }
+
+  function drawOcrOverlay(regions) {
+    const canvas = $("ocrCanvas");
+    if (!regions?.length || !currentImageData) {
+      canvas.classList.add("hidden");
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const scale = Math.max(1, canvas.width / 900);
+      ctx.lineWidth = Math.max(2, 2 * scale);
+      ctx.font = `${Math.max(15, 16 * scale)}px sans-serif`;
+      ctx.textBaseline = "top";
+      for (const r of regions) {
+        const b = r.bbox;
+        ctx.strokeStyle = "#0066cc";
+        ctx.fillStyle = "rgba(0,102,204,0.10)";
+        ctx.strokeRect(b.x0, b.y0, Math.max(1,b.x1-b.x0), Math.max(1,b.y1-b.y0));
+        ctx.fillRect(b.x0, b.y0, Math.max(1,b.x1-b.x0), Math.max(1,b.y1-b.y0));
+        const label = OCR_TYPE_LABELS[r.type] || "その他";
+        const w = ctx.measureText(label).width + 10 * scale;
+        const h = Math.max(19, 20 * scale);
+        const ly = Math.max(0, b.y0 - h);
+        ctx.fillStyle = "rgba(0,102,204,0.88)";
+        ctx.fillRect(b.x0, ly, w, h);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(label, b.x0 + 5 * scale, ly + 1 * scale);
+      }
+      canvas.classList.remove("hidden");
+    };
+    img.src = currentImageData;
+  }
+
+  function applyRegionsToForm() {
+    if (!currentOcrRegions.length) return;
+    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions);
+    applyExtracted(fields, true);
+    $("ocrStatus").textContent = "修正した分類をフォームへ反映しました。内容を確認してください。";
+  }
+
+  function resetRegionTypes() {
+    currentOcrRegions = currentOcrRegions.map(r => ({...r, type:r.autoType || "other"}));
+    renderOcrRegions();
+    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions);
+    applyExtracted(fields, true);
+    $("ocrStatus").textContent = "自動分類に戻しました。";
+  }
+
   function resetOcrSteps() {
     document.querySelectorAll("#ocrSteps [data-step]").forEach(el => {
       const label = el.textContent.replace(/^[✓▶✕○]\s*/, "");
@@ -298,15 +397,17 @@ const App = (() => {
       alert("OCR全文がありません。");
       return;
     }
-    setOcrStep("analyze","running","OCR全文を再解析中");
+    setOcrStep("analyze","running","OCR全文を再解析中（座標なし）");
     const x = LocalOCR.extract(text);
+    currentOcrRegions = (x.regions || []).map(r => ({...r, bbox:{...r.bbox}}));
+    renderOcrRegions();
     applyExtracted(x, false);
-    setOcrStep("analyze","done","項目解析・転記完了");
-    $("ocrStatus").textContent = "OCR全文から再解析しました。内容を確認してください。";
+    setOcrStep("analyze","done","全文再解析完了");
+    $("ocrStatus").textContent = "OCR全文を再解析しました。座標情報を使わない補助解析です。";
   }
 
   async function runOCR() {
-    if (!currentImageFile && !currentImageData) {
+    if (!currentImageData && !currentImageFile) {
       alert("先に名刺画像を撮影または選択してください。");
       return;
     }
@@ -314,6 +415,8 @@ const App = (() => {
     resetOcrSteps();
     $("ocrRawText").value = "";
     $("btnReanalyze").classList.add("hidden");
+    currentOcrRegions = [];
+    renderOcrRegions();
     $("btnOCR").disabled = true;
 
     try {
@@ -326,15 +429,15 @@ const App = (() => {
                    check.tesseractGlobal ? "Tesseract.js確認完了" : "Tesseract.js未読込");
         if (!check.worker.ok) setOcrStep("worker","error","worker.min.jsが見つかりません");
         if (!check.jpn.ok || !check.eng.ok) setOcrStep("lang","error","言語データが見つかりません");
-        if (!check.coreAny) setOcrStep("worker","error","Tesseract coreが見つかりません");
-        throw new Error("OCR資材が不足しています。設定→OCR自己診断を確認し、SETUP_OCR_V3_1.batを実行してください。");
+        if (!check.coreAll) setOcrStep("worker","error","LSTM core 3種類が揃っていません");
+        throw new Error("OCR資材が不足しています。SETUP_OCR_FINAL.batを実行してから再確認してください。");
       }
 
       setOcrStep("api","done","Tesseract.js確認完了");
       setOcrStep("worker","running","Worker起動中");
       $("ocrStatus").textContent = "Worker起動中…";
 
-      const text = await LocalOCR.recognize(currentImageFile || currentImageData, info => {
+      const layout = await LocalOCR.recognizeLayout(currentImageData || currentImageFile, info => {
         $("ocrStatus").textContent = info.text;
         if (info.stage === "api") setOcrStep("api","done",info.text);
         if (info.stage === "worker") setOcrStep("worker", info.text.includes("完了") ? "done":"running", info.text);
@@ -342,18 +445,21 @@ const App = (() => {
         if (info.stage === "recognize") setOcrStep("recognize", info.text.includes("完了") ? "done":"running", info.text);
       });
 
-      if (!text.trim()) throw new Error("OCRは完了しましたが文字を認識できませんでした。画像の向き・明るさ・ピントを確認してください。");
+      if (!layout.text.trim() && !layout.regions.length) {
+        throw new Error("OCRは完了しましたが文字を認識できませんでした。画像の向き・明るさ・ピントを確認してください。");
+      }
 
-      $("ocrRawText").value = text.trim();
-      $("btnReanalyze").classList.remove("hidden");
-      setOcrStep("recognize","done","文字認識完了");
+      $("ocrRawText").value = layout.text.trim();
+      $("btnReanalyze").classList.toggle("hidden", !layout.text.trim());
+      currentOcrRegions = layout.regions.map(r => ({...r, bbox:{...r.bbox}}));
+      renderOcrRegions();
+      setOcrStep("recognize","done",`座標付き文字認識完了（${currentOcrRegions.length}領域）`);
 
-      $("ocrStatus").textContent = "項目解析中…";
-      setOcrStep("analyze","running","項目解析・転記中");
-      const x = LocalOCR.extract(text);
-      applyExtracted(x, false);
-      setOcrStep("analyze","done","項目解析・転記完了");
-      $("ocrStatus").textContent = "OCR完了。OCR全文と各項目を確認してください。";
+      $("ocrStatus").textContent = "位置関係を解析して項目分類中…";
+      setOcrStep("analyze","running","座標・内容から項目分類中");
+      applyExtracted(layout.fields, false);
+      setOcrStep("analyze","done","座標解析・転記完了");
+      $("ocrStatus").textContent = "OCR完了。下のレイアウト解析結果を確認し、誤分類だけ修正してください。";
     } catch (err) {
       $("ocrStatus").textContent = `OCR停止: ${err.message}`;
       console.error(err);
@@ -372,11 +478,11 @@ const App = (() => {
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
 Japanese:     ${c.jpn?.ok ? "OK" : "NG"}
 English:      ${c.eng?.ok ? "OK" : "NG"}
-Core loader:  ${c.coreAny ? `OK (${coreCount} file)` : "NG"}
+LSTM Core:    ${c.coreAll ? `OK (${coreCount}/3)` : `NG (${coreCount}/3)`}
 ------------------------
 総合判定:      ${c.ready ? "OCR実行可能" : "OCR資材不足"}
 
-NGがある場合は SETUP_OCR_V3_1.bat を実行してください。`;
+NGがある場合は SETUP_OCR_FINAL.bat を実行してください。`;
   }
 
   async function openSettings() {
