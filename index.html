@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="名刺管理">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' https://cdn.jsdelivr.net https://tessdata.projectnaptha.com;">
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self';">
   <title>名刺管理</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="apple-touch-icon" href="./icons/icon-192.png">
@@ -18,7 +18,7 @@
   <header class="app-header">
     <div>
       <h1>名刺管理</h1>
-      <p class="sub">端末内保存・外部DB不使用</p>
+      <p class="sub">端末内保存・ローカルOCR</p>
     </div>
     <button id="btnNew" class="primary">＋ 登録</button>
   </header>
@@ -29,9 +29,7 @@
         <input id="searchInput" type="search" placeholder="会社名・氏名・タグ・メモなど">
       </div>
       <div class="toolbar">
-        <select id="categoryFilter">
-          <option value="">すべての分類</option>
-        </select>
+        <select id="categoryFilter"><option value="">すべての分類</option></select>
         <select id="sortSelect">
           <option value="updated_desc">更新日の新しい順</option>
           <option value="company_asc">会社名順</option>
@@ -55,16 +53,32 @@
           <input id="imageInput" type="file" accept="image/*" capture="environment">
         </label>
         <img id="imagePreview" class="preview hidden" alt="名刺画像プレビュー">
+
         <div class="row">
           <button id="btnOCR" class="secondary" type="button">端末内OCR</button>
-          <span id="ocrStatus" class="status"></span>
+          <button id="btnReanalyze" class="secondary hidden" type="button">OCR全文から再解析</button>
         </div>
-        <small>OCRはvendor/tessdataにローカルファイルを配置した場合のみ動作します。画像は外部へ送信しません。</small>
+
+        <div class="ocr-progress">
+          <div class="ocr-title">OCR状態</div>
+          <div id="ocrSteps" class="ocr-steps">
+            <div data-step="api">○ Tesseract.js確認</div>
+            <div data-step="worker">○ Worker起動</div>
+            <div data-step="lang">○ 日本語・英語データ読込</div>
+            <div data-step="recognize">○ 文字認識</div>
+            <div data-step="analyze">○ 項目解析・転記</div>
+          </div>
+          <div id="ocrStatus" class="status">待機中</div>
+        </div>
+
+        <label class="ocr-raw-label">OCR全文
+          <textarea id="ocrRawText" rows="9" placeholder="OCRが完了すると、認識した全文をここに表示します。"></textarea>
+        </label>
+        <small>OCR全文と各項目への転記を分離しています。OCR結果が正しいのに項目が違う場合は、全文を修正して「OCR全文から再解析」を押してください。</small>
       </div>
 
       <form id="cardForm" autocomplete="off">
         <input id="cardId" type="hidden">
-
         <div class="grid">
           <label>会社名<input id="company" type="text"></label>
           <label>会社名かな<input id="companyKana" type="text"></label>
@@ -79,9 +93,7 @@
           <label>郵便番号<input id="postalCode" type="text"></label>
           <label class="wide">住所<input id="address" type="text"></label>
           <label class="wide">Webサイト<input id="website" type="url"></label>
-          <label>分類
-            <select id="category"></select>
-          </label>
+          <label>分類<select id="category"></select></label>
           <label class="wide">タグ（カンマ区切り）
             <input id="tags" type="text" placeholder="研削盤, PCD, 自動化">
           </label>
@@ -108,6 +120,12 @@
       </div>
 
       <div class="panel">
+        <h3>OCR自己診断</h3>
+        <button id="btnOcrCheck" class="secondary">OCR資材を確認</button>
+        <pre id="ocrCheckResult" class="diagnostic">未確認</pre>
+      </div>
+
+      <div class="panel">
         <h3>データ</h3>
         <div id="stats" class="stats"></div>
         <div class="stack">
@@ -131,13 +149,13 @@
       <div class="panel">
         <h3>分類</h3>
         <textarea id="categorySettings" rows="8"></textarea>
-        <small>1行につき1分類。保存すると登録画面と絞り込みに反映されます。</small>
+        <small>1行につき1分類。</small>
         <button id="btnSaveSettings" class="primary">設定を保存</button>
       </div>
 
       <div class="panel warning-panel">
         <h3>全データ削除</h3>
-        <p>この端末内の名刺データをすべて削除します。元に戻せません。</p>
+        <p>この端末内の名刺データをすべて削除します。</p>
         <button id="btnDeleteAll" class="danger">全データ削除</button>
       </div>
     </section>
@@ -149,6 +167,8 @@
     <button id="navSettings">設定</button>
   </nav>
 
+  <!-- 必ずocr.jsより前 -->
+  <script src="./vendor/tesseract.min.js"></script>
   <script src="./js/db.js"></script>
   <script src="./js/backup.js"></script>
   <script src="./js/ocr.js"></script>

@@ -1,1 +1,3 @@
-ここにTesseract.js本体・worker・coreを配置します。詳細は../README.md参照。
+OCR JavaScript/WASM runtime is installed here by SETUP_OCR_V3.bat.
+After setup this folder contains tesseract.min.js, worker.min.js and core/*.wasm.js.
+Language files jpn/eng are already included under tessdata/.
