@@ -29,20 +29,21 @@ const LocalOCR = (() => {
     result.eng = await headOrGet(FILES.eng);
 
     // One of these core JS loaders will be selected depending on device capabilities.
-    const coreCandidates = [
-      "tesseract-core.wasm.js",
-      "tesseract-core-simd.wasm.js",
-      "tesseract-core-lstm.wasm.js",
-      "tesseract-core-simd-lstm.wasm.js",
-      "tesseract-core-relaxedsimd.wasm.js",
-      "tesseract-core-relaxedsimd-lstm.wasm.js"
+    const coreBases = [
+      "tesseract-core",
+      "tesseract-core-simd",
+      "tesseract-core-lstm",
+      "tesseract-core-simd-lstm",
+      "tesseract-core-relaxedsimd",
+      "tesseract-core-relaxedsimd-lstm"
     ];
     result.core = {};
-    for (const f of coreCandidates) {
-      const x = await headOrGet(FILES.coreDir + f);
-      result.core[f] = x.ok;
+    for (const base of coreBases) {
+      const js = await headOrGet(FILES.coreDir + base + ".wasm.js");
+      const wasm = await headOrGet(FILES.coreDir + base + ".wasm");
+      result.core[base] = { js: js.ok, wasm: wasm.ok, pair: js.ok && wasm.ok };
     }
-    result.coreAny = Object.values(result.core).some(Boolean);
+    result.coreAny = Object.values(result.core).some(x => x.pair);
     result.ready = result.tesseractGlobal && result.worker.ok && result.jpn.ok && result.eng.ok && result.coreAny;
     return result;
   }

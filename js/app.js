@@ -327,7 +327,7 @@ const App = (() => {
         if (!check.worker.ok) setOcrStep("worker","error","worker.min.jsが見つかりません");
         if (!check.jpn.ok || !check.eng.ok) setOcrStep("lang","error","言語データが見つかりません");
         if (!check.coreAny) setOcrStep("worker","error","Tesseract coreが見つかりません");
-        throw new Error("OCR資材が不足しています。設定→OCR自己診断を確認し、SETUP_OCR_V3.ps1を実行してください。");
+        throw new Error("OCR資材が不足しています。設定→OCR自己診断を確認し、SETUP_OCR_V3_1.batを実行してください。");
       }
 
       setOcrStep("api","done","Tesseract.js確認完了");
@@ -366,7 +366,7 @@ const App = (() => {
   async function runOcrSelfCheck() {
     $("ocrCheckResult").textContent = "確認中…";
     const c = await LocalOCR.selfCheck();
-    const coreCount = Object.values(c.core || {}).filter(Boolean).length;
+    const coreCount = Object.values(c.core || {}).filter(x => x && x.pair).length;
     $("ocrCheckResult").textContent =
 `Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
@@ -376,7 +376,7 @@ Core loader:  ${c.coreAny ? `OK (${coreCount} file)` : "NG"}
 ------------------------
 総合判定:      ${c.ready ? "OCR実行可能" : "OCR資材不足"}
 
-NGがある場合は SETUP_OCR_V3.ps1 を実行してください。`;
+NGがある場合は SETUP_OCR_V3_1.bat を実行してください。`;
   }
 
   async function openSettings() {
