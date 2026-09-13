@@ -1,11 +1,13 @@
 const LocalOCR = (() => {
-  let worker = null;
+  const workers = { horizontal: null, vertical: null };
+  const progressListeners = { horizontal: null, vertical: null };
 
   const FILES = {
     api: "./vendor/tesseract.min.js",
     worker: "./vendor/worker.min.js",
     coreDir: "./vendor/core/",
     jpn: "./tessdata/jpn.traineddata.gz",
+    jpnVert: "./tessdata/jpn_vert.traineddata.gz",
     eng: "./tessdata/eng.traineddata.gz"
   };
 
@@ -35,6 +37,7 @@ const LocalOCR = (() => {
     result.tesseractGlobal = typeof window.Tesseract !== "undefined";
     result.worker = await headOrGet(FILES.worker);
     result.jpn = await headOrGet(FILES.jpn);
+    result.jpnVert = await headOrGet(FILES.jpnVert);
     result.eng = await headOrGet(FILES.eng);
     result.core = {};
     for (const base of CORE_BASES) {
@@ -43,7 +46,7 @@ const LocalOCR = (() => {
       result.core[base] = { js: js.ok, wasm: wasm.ok, pair: js.ok && wasm.ok };
     }
     result.coreAll = CORE_BASES.every(base => result.core[base]?.pair);
-    result.ready = result.tesseractGlobal && result.worker.ok && result.jpn.ok && result.eng.ok && result.coreAll;
+    result.ready = result.tesseractGlobal && result.worker.ok && result.jpn.ok && result.jpnVert.ok && result.eng.ok && result.coreAll;
     return result;
   }
 
@@ -64,31 +67,61 @@ const LocalOCR = (() => {
     return t;
   }
 
-  async function ensureWorker(onProgress) {
-    if (worker) return worker;
+  async function ensureWorker(onProgress, mode = "horizontal") {
     if (typeof window.Tesseract === "undefined") {
       throw new Error("Tesseract.js本体が読み込まれていません。vendor/tesseract.min.jsを確認してください。");
     }
-    onProgress?.({ stage: "api", text: "Tesseract.js確認完了" });
-    worker = await Tesseract.createWorker(["jpn", "eng"], 1, {
-      workerPath: FILES.worker,
-      corePath: FILES.coreDir,
-      langPath: "./tessdata",
-      logger: m => {
-        const text = progressText(m);
-        let stage = "worker";
-        if ((m.status || "").includes("language")) stage = "lang";
-        if ((m.status || "").includes("recognizing")) stage = "recognize";
-        onProgress?.({ stage, text, raw: m });
+
+    const vertical = mode === "vertical";
+    progressListeners[mode] = onProgress || null;
+
+    if (!workers[mode]) {
+      onProgress?.({ stage: "api", text: vertical ? "Tesseract.js確認完了（縦書き）" : "Tesseract.js確認完了（横書き）" });
+      const langs = vertical ? ["jpn_vert", "eng"] : ["jpn", "eng"];
+
+      workers[mode] = await Tesseract.createWorker(langs, 1, {
+        workerPath: FILES.worker,
+        corePath: FILES.coreDir,
+        langPath: "./tessdata",
+        logger: m => {
+          const text = progressText(m);
+          let stage = "worker";
+          if ((m.status || "").includes("language")) stage = "lang";
+          if ((m.status || "").includes("recognizing")) stage = "recognize";
+          progressListeners[mode]?.({
+            stage,
+            text: `${vertical ? "縦書き" : "横書き"}: ${text}`,
+            raw: m
+          });
+        }
+      });
+
+      if (vertical) {
+        await workers[mode].setParameters({
+          tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+          preserve_interword_spaces: "1",
+          textord_tabfind_force_vertical_text: "1",
+          textord_tabfind_vertical_horizontal_mix: "1"
+        });
+      } else {
+        await workers[mode].setParameters({
+          tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+          preserve_interword_spaces: "1"
+        });
       }
-    });
-    await worker.setParameters({
-      tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-      preserve_interword_spaces: "1"
-    });
-    onProgress?.({ stage: "worker", text: "Worker起動完了（自動レイアウト解析）" });
-    onProgress?.({ stage: "lang", text: "日本語・英語データ読込完了" });
-    return worker;
+
+      onProgress?.({
+        stage: "worker",
+        text: vertical ? "縦書きWorker起動完了" : "横書きWorker起動完了（自動レイアウト解析）"
+      });
+      onProgress?.({
+        stage: "lang",
+        text: vertical ? "縦書き日本語・英語データ読込完了" : "日本語・英語データ読込完了"
+      });
+    }
+
+    progressListeners[mode] = onProgress || null;
+    return workers[mode];
   }
 
   function median(values) {
@@ -111,6 +144,12 @@ const LocalOCR = (() => {
   function bboxHeight(b) { return Math.max(1, b.y1 - b.y0); }
   function bboxWidth(b) { return Math.max(1, b.x1 - b.x0); }
   function centerY(b) { return (b.y0 + b.y1) / 2; }
+  function centerX(b) { return (b.x0 + b.x1) / 2; }
+
+  function horizontalOverlap(a, b) {
+    const overlap = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+    return overlap / Math.max(1, Math.min(bboxWidth(a), bboxWidth(b)));
+  }
 
   function flattenWords(blocks) {
     const words = [];
@@ -149,7 +188,7 @@ const LocalOCR = (() => {
     return false;
   }
 
-  function groupWords(words) {
+  function groupWordsHorizontal(words) {
     if (!words.length) return { regions: [], width: 1, height: 1 };
     const page = unionBBox(words);
     const pageWidth = Math.max(1, page.x1);
@@ -212,6 +251,90 @@ const LocalOCR = (() => {
     // Merge very close fragments that belong to the same visual unit, while never bridging large horizontal gaps.
     const regions = rawRegions.map(r => ({ ...r, type: "other", autoType: "other", score: 0 }));
     return { regions, width: pageWidth, height: pageHeight, medianHeight: medH };
+  }
+
+  function groupWordsVertical(words) {
+    if (!words.length) return { regions: [], width: 1, height: 1 };
+    const page = unionBBox(words);
+    const pageWidth = Math.max(1, page.x1);
+    const pageHeight = Math.max(1, page.y1);
+    const medW = Math.max(8, median(words.map(w => w.w)));
+
+    const columns = [];
+    const candidates = [...words].sort((a, b) =>
+      centerX(b.bbox) - centerX(a.bbox) || a.bbox.y0 - b.bbox.y0
+    );
+
+    for (const word of candidates) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const col of columns) {
+        const cb = col.bbox;
+        const dist = Math.abs(centerX(word.bbox) - centerX(cb));
+        if ((horizontalOverlap(word.bbox, cb) >= 0.30 || dist <= medW * 0.72) && dist < bestDist) {
+          best = col;
+          bestDist = dist;
+        }
+      }
+      if (!best) {
+        columns.push({ words: [word], bbox: { ...word.bbox } });
+      } else {
+        best.words.push(word);
+        best.bbox = unionBBox(best.words);
+      }
+    }
+
+    const rawRegions = [];
+    let id = 1;
+
+    for (const col of columns.sort((a, b) => b.bbox.x1 - a.bbox.x1)) {
+      const colWords = col.words.sort((a, b) => a.bbox.y0 - b.bbox.y0);
+      const colMedW = Math.max(8, median(colWords.map(w => w.w)));
+      let chunk = [];
+
+      const flush = () => {
+        if (!chunk.length) return;
+        const bbox = unionBBox(chunk);
+        rawRegions.push({
+          id: `v${id++}`,
+          text: joinVerticalWords(chunk.map(w => w.text)),
+          words: chunk.map(w => ({ text: w.text, bbox: { ...w.bbox }, confidence: w.confidence })),
+          bbox,
+          confidence: Math.round(chunk.reduce((s, w) => s + w.confidence, 0) / chunk.length),
+          avgHeight: chunk.reduce((s, w) => s + w.h, 0) / chunk.length,
+          avgWidth: chunk.reduce((s, w) => s + w.w, 0) / chunk.length,
+          orientation: "vertical"
+        });
+        chunk = [];
+      };
+
+      for (const word of colWords) {
+        if (!chunk.length) {
+          chunk.push(word);
+          continue;
+        }
+        const prev = chunk[chunk.length - 1];
+        const gap = word.bbox.y0 - prev.bbox.y1;
+        const gapLimit = Math.max(colMedW * 2.2, pageHeight * 0.040, 28);
+        if (gap > gapLimit) flush();
+        chunk.push(word);
+      }
+      flush();
+    }
+
+    return {
+      regions: rawRegions.map(r => ({ ...r, type: "other", autoType: "other", score: 0 })),
+      width: pageWidth,
+      height: pageHeight,
+      medianWidth: medW
+    };
+  }
+
+  function joinVerticalWords(parts) {
+    return parts.join("")
+      .replace(/\s+/g, "")
+      .replace(/[‐‑‒–—―ー]{2,}/g, "-")
+      .trim();
   }
 
   function joinWords(parts) {
@@ -306,8 +429,134 @@ const LocalOCR = (() => {
     });
   }
 
-  function sortedByVisual(regions) {
-    return [...regions].sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+  // Convert 2D OCR regions into human reading order.
+  // Regions are first clustered into visual rows using vertical overlap / center distance,
+  // then rows are ordered top-to-bottom and each row left-to-right.
+  // This avoids the common two-column failure where a slightly higher right-hand region
+  // is incorrectly read before the left-hand region on the same visual row.
+  function sortedByVisualHorizontal(regions) {
+    if (!regions?.length) return [];
+
+    const items = regions.map(r => ({ ...r, bbox: { ...r.bbox } }));
+    const heights = items.map(r => Math.max(1, r.bbox.y1 - r.bbox.y0));
+    const medH = Math.max(8, median(heights));
+
+    const rows = [];
+    const candidates = [...items].sort((a, b) =>
+      centerY(a.bbox) - centerY(b.bbox) || a.bbox.x0 - b.bbox.x0
+    );
+
+    for (const region of candidates) {
+      let bestRow = null;
+      let bestScore = -Infinity;
+
+      for (const row of rows) {
+        const rb = row.bbox;
+        const overlap = verticalOverlap(region.bbox, rb);
+        const centerDist = Math.abs(centerY(region.bbox) - centerY(rb));
+        const regionH = Math.max(1, region.bbox.y1 - region.bbox.y0);
+        const rowH = Math.max(1, rb.y1 - rb.y0);
+        const tolerance = Math.max(medH * 0.72, Math.min(regionH, rowH) * 0.62);
+
+        // Same visual line if boxes overlap vertically enough, or their centers are close.
+        if (overlap >= 0.28 || centerDist <= tolerance) {
+          const score = overlap * 100 - centerDist;
+          if (score > bestScore) {
+            bestScore = score;
+            bestRow = row;
+          }
+        }
+      }
+
+      if (!bestRow) {
+        rows.push({ regions: [region], bbox: { ...region.bbox } });
+      } else {
+        bestRow.regions.push(region);
+        bestRow.bbox = unionBBox(bestRow.regions);
+      }
+    }
+
+    // Stable top-to-bottom row order. For nearly equal row tops, use row center.
+    rows.sort((a, b) => {
+      const dy = a.bbox.y0 - b.bbox.y0;
+      if (Math.abs(dy) > medH * 0.35) return dy;
+      return centerY(a.bbox) - centerY(b.bbox);
+    });
+
+    const ordered = [];
+    let readingOrder = 1;
+    for (const row of rows) {
+      row.regions.sort((a, b) => a.bbox.x0 - b.bbox.x0 || a.bbox.x1 - b.bbox.x1);
+      for (const region of row.regions) {
+        ordered.push({ ...region, readingOrder: readingOrder++ });
+      }
+    }
+    return ordered;
+  }
+
+
+  function sortedByVisualVertical(regions) {
+    if (!regions?.length) return [];
+
+    const items = regions.map(r => ({ ...r, bbox: { ...r.bbox } }));
+    const widths = items.map(r => Math.max(1, r.bbox.x1 - r.bbox.x0));
+    const medW = Math.max(8, median(widths));
+
+    const columns = [];
+    const candidates = [...items].sort((a, b) =>
+      centerX(b.bbox) - centerX(a.bbox) || a.bbox.y0 - b.bbox.y0
+    );
+
+    for (const region of candidates) {
+      let bestCol = null;
+      let bestScore = -Infinity;
+
+      for (const col of columns) {
+        const cb = col.bbox;
+        const overlap = horizontalOverlap(region.bbox, cb);
+        const centerDist = Math.abs(centerX(region.bbox) - centerX(cb));
+        const regionW = Math.max(1, region.bbox.x1 - region.bbox.x0);
+        const colW = Math.max(1, cb.x1 - cb.x0);
+        const tolerance = Math.max(medW * 0.80, Math.min(regionW, colW) * 0.72);
+
+        if (overlap >= 0.24 || centerDist <= tolerance) {
+          const score = overlap * 100 - centerDist;
+          if (score > bestScore) {
+            bestScore = score;
+            bestCol = col;
+          }
+        }
+      }
+
+      if (!bestCol) {
+        columns.push({ regions: [region], bbox: { ...region.bbox } });
+      } else {
+        bestCol.regions.push(region);
+        bestCol.bbox = unionBBox(bestCol.regions);
+      }
+    }
+
+    columns.sort((a, b) => {
+      const dx = b.bbox.x1 - a.bbox.x1;
+      if (Math.abs(dx) > medW * 0.35) return dx;
+      return centerX(b.bbox) - centerX(a.bbox);
+    });
+
+    const ordered = [];
+    let readingOrder = 1;
+    for (const col of columns) {
+      col.regions.sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.y1 - b.bbox.y1);
+      for (const region of col.regions) {
+        ordered.push({ ...region, readingOrder: readingOrder++, orientation: "vertical" });
+      }
+    }
+    return ordered;
+  }
+
+  function sortedByVisual(regions, orientation = "horizontal") {
+    return orientation === "vertical"
+      ? sortedByVisualVertical(regions)
+      : sortedByVisualHorizontal(regions);
   }
 
   function extractEmail(s) {
@@ -342,8 +591,8 @@ const LocalOCR = (() => {
     return [...list].sort((a, b) => b.score - a.score || b.avgHeight - a.avgHeight || a.bbox.y0 - b.bbox.y0)[0];
   }
 
-  function fieldsFromRegions(regions) {
-    const visual = sortedByVisual(regions);
+  function fieldsFromRegions(regions, orientation = "horizontal") {
+    const visual = sortedByVisual(regions, orientation);
     const companyR = choose(visual, "company");
     const nameR = choose(visual, "name");
     const dept = visual.filter(r => r.type === "department").map(r => r.text).join(" ").trim();
@@ -372,19 +621,103 @@ const LocalOCR = (() => {
     };
   }
 
-  async function recognizeLayout(image, onProgress) {
-    const w = await ensureWorker(onProgress);
-    onProgress?.({ stage: "recognize", text: "座標付き文字認識開始" });
+  function qualityMetrics(layout) {
+    const words = layout.words || [];
+    const regions = layout.regions || [];
+    const avgConfidence = words.length
+      ? words.reduce((s, w) => s + Number(w.confidence || 0), 0) / words.length
+      : 0;
+    const strongTypes = new Set(
+      regions.filter(r => r.type && r.type !== "other").map(r => r.type)
+    ).size;
+    const singleCharRatio = words.length
+      ? words.filter(w => String(w.text || "").replace(/\s/g, "").length <= 1).length / words.length
+      : 1;
+    const tallWordRatio = words.length
+      ? words.filter(w => bboxHeight(w.bbox) > bboxWidth(w.bbox) * 1.55).length / words.length
+      : 0;
+
+    const textLen = String(layout.text || "").replace(/\s/g, "").length;
+    const score =
+      avgConfidence * 0.55 +
+      Math.min(28, strongTypes * 5.5) +
+      Math.min(12, textLen / 8) -
+      Math.max(0, singleCharRatio - 0.72) * 20;
+
+    return { score, avgConfidence, strongTypes, singleCharRatio, tallWordRatio, textLen };
+  }
+
+  async function recognizeOne(image, orientation, onProgress) {
+    const w = await ensureWorker(onProgress, orientation);
+    const label = orientation === "vertical" ? "縦書き" : "横書き";
+    onProgress?.({ stage: "recognize", text: `${label}: 座標付き文字認識開始` });
+
     const ret = await w.recognize(image, {}, { text: true, blocks: true });
     const text = ret?.data?.text || "";
     const blocks = ret?.data?.blocks || [];
     const words = flattenWords(blocks);
-    const grouped = groupWords(words);
+    const grouped = orientation === "vertical"
+      ? groupWordsVertical(words)
+      : groupWordsHorizontal(words);
+
     const page = { width: grouped.width, height: grouped.height };
-    const regions = classifyRegions(grouped.regions, page);
-    const fields = fieldsFromRegions(regions);
-    onProgress?.({ stage: "recognize", text: `座標付き文字認識完了（${words.length}語 / ${regions.length}領域）` });
-    return { text, blocks, words, regions, fields, page };
+    const classified = classifyRegions(grouped.regions, page);
+    const regions = sortedByVisual(classified, orientation);
+    const fields = fieldsFromRegions(regions, orientation);
+
+    const layout = { text, blocks, words, regions, fields, page, orientation };
+    layout.quality = qualityMetrics(layout);
+
+    onProgress?.({
+      stage: "recognize",
+      text: `${label}: 文字認識完了（${words.length}語 / ${regions.length}領域 / 信頼度${Math.round(layout.quality.avgConfidence)}%）`
+    });
+    return layout;
+  }
+
+  function shouldTryVertical(horizontal) {
+    const q = horizontal.quality || qualityMetrics(horizontal);
+    return (
+      q.avgConfidence < 72 ||
+      q.strongTypes < 3 ||
+      q.tallWordRatio > 0.28 ||
+      q.singleCharRatio > 0.62
+    );
+  }
+
+  async function recognizeLayout(image, onProgress, requestedMode = "auto") {
+    if (requestedMode === "horizontal") {
+      return recognizeOne(image, "horizontal", onProgress);
+    }
+    if (requestedMode === "vertical") {
+      return recognizeOne(image, "vertical", onProgress);
+    }
+
+    const horizontal = await recognizeOne(image, "horizontal", onProgress);
+
+    if (!shouldTryVertical(horizontal)) {
+      horizontal.autoDecision = "horizontal-only";
+      return horizontal;
+    }
+
+    onProgress?.({
+      stage: "recognize",
+      text: "縦書きの可能性を検出。縦書きOCRでも比較中…"
+    });
+
+    const vertical = await recognizeOne(image, "vertical", onProgress);
+
+    const h = horizontal.quality;
+    const v = vertical.quality;
+    const chooseVertical =
+      v.score > h.score + 4 ||
+      (h.strongTypes < 2 && v.strongTypes > h.strongTypes && v.score >= h.score - 2) ||
+      (h.tallWordRatio > 0.40 && v.avgConfidence > h.avgConfidence + 3);
+
+    const selected = chooseVertical ? vertical : horizontal;
+    selected.autoDecision = chooseVertical ? "vertical" : "horizontal";
+    selected.alternativeQuality = chooseVertical ? h : v;
+    return selected;
   }
 
   // Coordinate-free fallback used only after a user manually edits the OCR raw text.
@@ -398,17 +731,19 @@ const LocalOCR = (() => {
     const width = Math.max(1, ...pseudo.map(r => r.bbox.x1));
     const height = Math.max(1, pseudo.length * 30);
     const regions = classifyRegions(pseudo, { width, height });
-    return { ...fieldsFromRegions(regions), regions };
+    return { ...fieldsFromRegions(regions, "horizontal"), regions, orientation: "horizontal" };
   }
 
   async function terminate() {
-    if (worker) {
-      try { await worker.terminate(); } catch {}
-      worker = null;
+    for (const mode of ["horizontal", "vertical"]) {
+      if (workers[mode]) {
+        try { await workers[mode].terminate(); } catch {}
+        workers[mode] = null;
+      }
     }
   }
 
   return {
-    selfCheck, recognizeLayout, extract, fieldsFromRegions, terminate, FILES, CORE_BASES, TYPES
+    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, terminate, FILES, CORE_BASES, TYPES
   };
 })();

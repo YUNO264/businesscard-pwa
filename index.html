@@ -55,6 +55,17 @@
         </label>
         <img id="imagePreview" class="preview hidden" alt="名刺画像プレビュー">
 
+        <div class="ocr-direction-row">
+          <label>文字方向
+            <select id="ocrDirection">
+              <option value="auto">自動判定（推奨）</option>
+              <option value="horizontal">横書き</option>
+              <option value="vertical">縦書き</option>
+            </select>
+          </label>
+          <span id="ocrModeUsed" class="ocr-mode-used"></span>
+        </div>
+
         <div class="row">
           <button id="btnOCR" class="secondary" type="button">端末内OCR</button>
           <button id="btnReanalyze" class="secondary hidden" type="button">OCR全文から再解析</button>
@@ -79,7 +90,7 @@
 
         <section id="ocrLayoutPanel" class="ocr-layout-panel hidden">
           <h3>レイアウト解析結果</h3>
-          <p class="layout-note">名刺上の位置を使って文字領域を分離しています。誤分類があればプルダウンで変更してから「分類をフォームに反映」を押してください。</p>
+          <p class="layout-note">名刺上の位置を使って文字領域を分離しています。横書きは上→下・左→右、縦書きは右列→左列・各列上→下の順で読みます。誤分類があればプルダウンで変更してから「分類をフォームに反映」を押してください。</p>
           <canvas id="ocrCanvas" class="ocr-canvas"></canvas>
           <div id="ocrRegionList" class="ocr-region-list"></div>
           <div class="row">

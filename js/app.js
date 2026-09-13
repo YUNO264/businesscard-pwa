@@ -7,6 +7,7 @@ const App = (() => {
   let currentImageData = null;
   let currentImageFile = null;
   let currentOcrRegions = [];
+  let currentOcrOrientation = "horizontal";
   let cards = [];
   let categories = [...DEFAULT_CATEGORIES];
 
@@ -131,6 +132,9 @@ const App = (() => {
     $("ocrRawText").value = "";
     $("btnReanalyze").classList.add("hidden");
     currentOcrRegions = [];
+    currentOcrOrientation = "horizontal";
+    if ($("ocrDirection")) $("ocrDirection").value = "auto";
+    if ($("ocrModeUsed")) $("ocrModeUsed").textContent = "";
     renderOcrRegions();
     resetOcrSteps();
     show("viewEdit");
@@ -159,6 +163,10 @@ const App = (() => {
     $("ocrRawText").value = c.ocrRawText || "";
     $("btnReanalyze").classList.toggle("hidden", !$("ocrRawText").value);
     currentOcrRegions = Array.isArray(c.ocrRegions) ? c.ocrRegions.map(r => ({...r, bbox:{...r.bbox}})) : [];
+    currentOcrOrientation = c.ocrOrientation || "horizontal";
+    if ($("ocrDirection")) $("ocrDirection").value = c.ocrRequestedMode || "auto";
+    if ($("ocrModeUsed")) $("ocrModeUsed").textContent =
+      currentOcrRegions.length ? `保存済みOCR方向: ${currentOcrOrientation === "vertical" ? "縦書き" : "横書き"}` : "";
     renderOcrRegions();
     $("saveImage").checked = !!c.imageData;
     currentImageData = c.imageData || null;
@@ -200,6 +208,8 @@ const App = (() => {
       tags: $("tags").value.split(/[,\n、]/).map(x => x.trim()).filter(Boolean),
       memo: $("memo").value.trim(),
       ocrRawText: $("ocrRawText").value.trim(),
+      ocrOrientation: currentOcrOrientation,
+      ocrRequestedMode: $("ocrDirection")?.value || "auto",
       ocrRegions: currentOcrRegions.map(r => ({
         id:r.id, text:r.text, bbox:{...r.bbox}, confidence:r.confidence,
         avgHeight:r.avgHeight, type:r.type, autoType:r.autoType, score:r.score
@@ -278,9 +288,10 @@ const App = (() => {
     }
     panel.classList.remove("hidden");
     const options = Object.entries(OCR_TYPE_LABELS).map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+    currentOcrRegions = LocalOCR.sortedByVisual(currentOcrRegions, currentOcrOrientation);
     $("ocrRegionList").innerHTML = currentOcrRegions
-      .sort((a,b) => a.bbox.y0-b.bbox.y0 || a.bbox.x0-b.bbox.x0)
       .map(r => `<div class="ocr-region-row" data-region="${r.id}">
+        <div class="ocr-reading-order">${r.readingOrder ?? ""}</div>
         <select class="ocr-region-type">${options}</select>
         <div class="ocr-region-text">${escapeHtml(r.text)}</div>
         <div class="ocr-region-meta">信頼度 ${Math.round(r.confidence || 0)}%</div>
@@ -320,7 +331,7 @@ const App = (() => {
         ctx.fillStyle = "rgba(0,102,204,0.10)";
         ctx.strokeRect(b.x0, b.y0, Math.max(1,b.x1-b.x0), Math.max(1,b.y1-b.y0));
         ctx.fillRect(b.x0, b.y0, Math.max(1,b.x1-b.x0), Math.max(1,b.y1-b.y0));
-        const label = OCR_TYPE_LABELS[r.type] || "その他";
+        const label = `${r.readingOrder ?? ""} ${OCR_TYPE_LABELS[r.type] || "その他"}`.trim();
         const w = ctx.measureText(label).width + 10 * scale;
         const h = Math.max(19, 20 * scale);
         const ly = Math.max(0, b.y0 - h);
@@ -336,7 +347,7 @@ const App = (() => {
 
   function applyRegionsToForm() {
     if (!currentOcrRegions.length) return;
-    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions);
+    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions, currentOcrOrientation);
     applyExtracted(fields, true);
     $("ocrStatus").textContent = "修正した分類をフォームへ反映しました。内容を確認してください。";
   }
@@ -344,7 +355,7 @@ const App = (() => {
   function resetRegionTypes() {
     currentOcrRegions = currentOcrRegions.map(r => ({...r, type:r.autoType || "other"}));
     renderOcrRegions();
-    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions);
+    const fields = LocalOCR.fieldsFromRegions(currentOcrRegions, currentOcrOrientation);
     applyExtracted(fields, true);
     $("ocrStatus").textContent = "自動分類に戻しました。";
   }
@@ -400,6 +411,8 @@ const App = (() => {
     setOcrStep("analyze","running","OCR全文を再解析中（座標なし）");
     const x = LocalOCR.extract(text);
     currentOcrRegions = (x.regions || []).map(r => ({...r, bbox:{...r.bbox}}));
+    currentOcrOrientation = "horizontal";
+    if ($("ocrModeUsed")) $("ocrModeUsed").textContent = "OCR全文の再解析: 座標なし（横書き扱い）";
     renderOcrRegions();
     applyExtracted(x, false);
     setOcrStep("analyze","done","全文再解析完了");
@@ -437,13 +450,14 @@ const App = (() => {
       setOcrStep("worker","running","Worker起動中");
       $("ocrStatus").textContent = "Worker起動中…";
 
+      const requestedMode = $("ocrDirection")?.value || "auto";
       const layout = await LocalOCR.recognizeLayout(currentImageData || currentImageFile, info => {
         $("ocrStatus").textContent = info.text;
         if (info.stage === "api") setOcrStep("api","done",info.text);
         if (info.stage === "worker") setOcrStep("worker", info.text.includes("完了") ? "done":"running", info.text);
         if (info.stage === "lang") setOcrStep("lang", info.text.includes("完了") ? "done":"running", info.text);
         if (info.stage === "recognize") setOcrStep("recognize", info.text.includes("完了") ? "done":"running", info.text);
-      });
+      }, requestedMode);
 
       if (!layout.text.trim() && !layout.regions.length) {
         throw new Error("OCRは完了しましたが文字を認識できませんでした。画像の向き・明るさ・ピントを確認してください。");
@@ -452,6 +466,12 @@ const App = (() => {
       $("ocrRawText").value = layout.text.trim();
       $("btnReanalyze").classList.toggle("hidden", !layout.text.trim());
       currentOcrRegions = layout.regions.map(r => ({...r, bbox:{...r.bbox}}));
+      currentOcrOrientation = layout.orientation || "horizontal";
+      if ($("ocrModeUsed")) {
+        const modeText = currentOcrOrientation === "vertical" ? "縦書き" : "横書き";
+        const autoText = requestedMode === "auto" ? "（自動判定）" : "（手動指定）";
+        $("ocrModeUsed").textContent = `採用OCR方向: ${modeText}${autoText}`;
+      }
       renderOcrRegions();
       setOcrStep("recognize","done",`座標付き文字認識完了（${currentOcrRegions.length}領域）`);
 
@@ -477,6 +497,7 @@ const App = (() => {
 `Tesseract.js: ${c.tesseractGlobal ? "OK" : "NG"}
 Worker:       ${c.worker?.ok ? "OK" : "NG"}
 Japanese:     ${c.jpn?.ok ? "OK" : "NG"}
+Japanese Vert: ${c.jpnVert?.ok ? "OK" : "NG"}
 English:      ${c.eng?.ok ? "OK" : "NG"}
 LSTM Core:    ${c.coreAll ? `OK (${coreCount}/3)` : `NG (${coreCount}/3)`}
 ------------------------
