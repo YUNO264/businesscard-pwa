@@ -255,14 +255,14 @@ const LocalOCR = (() => {
   }
 
   function compactJapaneseSpaces(text) {
-    let s = String(text || "");
-    // Remove artificial OCR spaces only when both sides are Japanese characters.
-    // Latin names/addresses still retain meaningful spaces.
-    for (let i = 0; i < 3; i++) {
-      s = s.replace(/([一-龥々〆ヵヶぁ-んァ-ヶー])\s+(?=[一-龥々〆ヵヶぁ-んァ-ヶー])/g, "$1");
-    }
-    return s.replace(/\s+/g, " ").trim();
+    // OCR often inserts artificial spaces between Japanese characters/words.
+    // For business-card field values, remove all horizontal whitespace:
+    // half-width space, full-width space, tab, NBSP, etc.
+    return String(text || "")
+      .replace(/[ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, "")
+      .trim();
   }
+
 
   function wordsToHorizontalReading(words) {
     const rows = clusterWordsIntoHorizontalRows(words);
@@ -281,6 +281,36 @@ const LocalOCR = (() => {
       words: orderedWords,
       text: compactJapaneseSpaces(rowTexts.join(""))
     };
+  }
+
+
+  // Split a visual group when the OCR bounding-box size changes clearly.
+  // Use the current group's MEDIAN size instead of the previous token so
+  // one unusually tall/short glyph does not cause cascading splits.
+  const FONT_SIZE_SPLIT_RATIO = 1.35;
+  const FONT_SIZE_SPLIT_MIN_PX = 4;
+
+  function horizontalFontSize(word) {
+    return Math.max(1, word.h || bboxHeight(word.bbox));
+  }
+
+  function verticalFontSize(word) {
+    return Math.max(1, word.w || bboxWidth(word.bbox));
+  }
+
+  function shouldSplitByFontSize(chunk, nextWord, orientation = "horizontal") {
+    if (!chunk?.length || !nextWord) return false;
+
+    const metric = orientation === "vertical" ? verticalFontSize : horizontalFontSize;
+    const sizes = chunk.map(metric).filter(Number.isFinite);
+    if (!sizes.length) return false;
+
+    const base = Math.max(1, median(sizes));
+    const next = Math.max(1, metric(nextWord));
+    const ratio = Math.max(base, next) / Math.max(1, Math.min(base, next));
+    const diff = Math.abs(base - next);
+
+    return ratio >= FONT_SIZE_SPLIT_RATIO && diff >= FONT_SIZE_SPLIT_MIN_PX;
   }
 
   function groupWordsHorizontal(words) {
@@ -333,7 +363,16 @@ const LocalOCR = (() => {
         const hard = isHardBoundary(word.text, currentText);
         const gapLimit = Math.max(rowMedH * 2.25, pageWidth * 0.045, 30);
         const semanticGap = Math.max(rowMedH * 0.45, 8);
-        if (gap > gapLimit || (hard && gap > semanticGap)) flush();
+        const fontSizeChanged = shouldSplitByFontSize(chunk, word, "horizontal");
+
+        if (
+          gap > gapLimit ||
+          (hard && gap > semanticGap) ||
+          fontSizeChanged
+        ) {
+          flush();
+        }
+
         chunk.push(word);
       }
       flush();
@@ -433,7 +472,12 @@ const LocalOCR = (() => {
         const prev = chunk[chunk.length - 1];
         const gap = word.bbox.y0 - prev.bbox.y1;
         const gapLimit = Math.max(colMedW * 2.2, pageHeight * 0.040, 28);
-        if (gap > gapLimit) flush();
+        const fontSizeChanged = shouldSplitByFontSize(chunk, word, "vertical");
+
+        if (gap > gapLimit || fontSizeChanged) {
+          flush();
+        }
+
         chunk.push(word);
       }
       flush();
@@ -448,10 +492,10 @@ const LocalOCR = (() => {
   }
 
   function joinVerticalWords(parts) {
-    return parts.join("")
-      .replace(/\s+/g, "")
-      .replace(/[‐‑‒–—―ー]{2,}/g, "-")
-      .trim();
+    return compactJapaneseSpaces(
+      parts.join("")
+        .replace(/[‐‑‒–—―ー]{2,}/g, "-")
+    );
   }
 
   function joinWords(parts) {
@@ -861,6 +905,6 @@ const LocalOCR = (() => {
   }
 
   return {
-    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, wordsToHorizontalReading, terminate, FILES, CORE_BASES, TYPES
+    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, wordsToHorizontalReading, shouldSplitByFontSize, terminate, FILES, CORE_BASES, TYPES
   };
 })();

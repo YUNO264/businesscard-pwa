@@ -13,6 +13,12 @@ const App = (() => {
   let categories = [...DEFAULT_CATEGORIES];
 
   const $ = id => document.getElementById(id);
+  const removeOcrSpacesPreserveLines = text =>
+    String(text || "")
+      .split(/\r?\n/)
+      .map(line => line.replace(/[ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, ""))
+      .join("\n");
+
 
   async function init() {
     await CardDB.open();
@@ -519,7 +525,7 @@ const App = (() => {
         throw new Error("OCRは完了しましたが文字を認識できませんでした。画像の向き・明るさ・ピントを確認してください。");
       }
 
-      $("ocrRawText").value = layout.text.trim();
+      $("ocrRawText").value = removeOcrSpacesPreserveLines(layout.text).trim();
       $("btnReanalyze").classList.toggle("hidden", !layout.text.trim());
       currentOcrRegions = layout.regions.map(r => ({...r, bbox:{...r.bbox}}));
       currentOcrOrientation = layout.orientation || "horizontal";
