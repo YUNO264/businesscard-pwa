@@ -188,6 +188,101 @@ const LocalOCR = (() => {
     return false;
   }
 
+
+  // Robustly divide horizontal OCR tokens into visual lines.
+  // Important: do NOT use the growing union bbox as the row anchor.
+  // A growing bbox can bridge two nearby lines and then X-sorting interleaves them.
+  function clusterWordsIntoHorizontalRows(words) {
+    if (!words?.length) return [];
+
+    const medH = Math.max(8, median(words.map(w => w.h || bboxHeight(w.bbox))));
+    const candidates = [...words].sort((a, b) =>
+      centerY(a.bbox) - centerY(b.bbox) || a.bbox.x0 - b.bbox.x0
+    );
+
+    const rows = [];
+
+    for (const word of candidates) {
+      const cy = centerY(word.bbox);
+      const wh = Math.max(1, word.h || bboxHeight(word.bbox));
+
+      let best = null;
+      let bestDist = Infinity;
+
+      for (const row of rows) {
+        const rowH = Math.max(1, row.medianHeight || medH);
+        const dist = Math.abs(cy - row.centerY);
+
+        // Keep the tolerance narrower than one text height.
+        // This prevents two separate printed lines from chaining into one row.
+        const tolerance = Math.max(
+          5,
+          Math.min(medH * 0.62, Math.max(wh, rowH) * 0.70)
+        );
+
+        if (dist <= tolerance && dist < bestDist) {
+          best = row;
+          bestDist = dist;
+        }
+      }
+
+      if (!best) {
+        rows.push({
+          words: [word],
+          centerY: cy,
+          medianHeight: wh,
+          bbox: { ...word.bbox }
+        });
+      } else {
+        best.words.push(word);
+        best.centerY = median(best.words.map(w => centerY(w.bbox)));
+        best.medianHeight = median(best.words.map(w => w.h || bboxHeight(w.bbox)));
+        best.bbox = unionBBox(best.words);
+      }
+    }
+
+    rows.sort((a, b) => a.centerY - b.centerY);
+
+    for (const row of rows) {
+      row.words.sort((a, b) =>
+        a.bbox.x0 - b.bbox.x0 ||
+        centerY(a.bbox) - centerY(b.bbox) ||
+        a.bbox.x1 - b.bbox.x1
+      );
+    }
+
+    return rows;
+  }
+
+  function compactJapaneseSpaces(text) {
+    let s = String(text || "");
+    // Remove artificial OCR spaces only when both sides are Japanese characters.
+    // Latin names/addresses still retain meaningful spaces.
+    for (let i = 0; i < 3; i++) {
+      s = s.replace(/([一-龥々〆ヵヶぁ-んァ-ヶー])\s+(?=[一-龥々〆ヵヶぁ-んァ-ヶー])/g, "$1");
+    }
+    return s.replace(/\s+/g, " ").trim();
+  }
+
+  function wordsToHorizontalReading(words) {
+    const rows = clusterWordsIntoHorizontalRows(words);
+    const orderedWords = [];
+    const rowTexts = [];
+
+    for (const row of rows) {
+      orderedWords.push(...row.words);
+      rowTexts.push(compactJapaneseSpaces(joinWords(row.words.map(w => w.text))));
+    }
+
+    // A grouped business-card field is read row 1 left->right, then row 2 left->right.
+    // Japanese adjacent rows are concatenated without introducing artificial spaces.
+    return {
+      rows,
+      words: orderedWords,
+      text: compactJapaneseSpaces(rowTexts.join(""))
+    };
+  }
+
   function groupWordsHorizontal(words) {
     if (!words.length) return { regions: [], width: 1, height: 1 };
     const page = unionBBox(words);
@@ -195,24 +290,7 @@ const LocalOCR = (() => {
     const pageHeight = Math.max(1, page.y1);
     const medH = Math.max(8, median(words.map(w => w.h)));
 
-    const rows = [];
-    for (const word of [...words].sort((a, b) => centerY(a.bbox) - centerY(b.bbox) || a.bbox.x0 - b.bbox.x0)) {
-      let best = null;
-      let bestDist = Infinity;
-      for (const row of rows) {
-        const rb = row.bbox;
-        const dist = Math.abs(centerY(word.bbox) - centerY(rb));
-        if ((verticalOverlap(word.bbox, rb) >= 0.42 || dist <= medH * 0.58) && dist < bestDist) {
-          best = row; bestDist = dist;
-        }
-      }
-      if (!best) {
-        rows.push({ words: [word], bbox: { ...word.bbox } });
-      } else {
-        best.words.push(word);
-        best.bbox = unionBBox(best.words);
-      }
-    }
+    const rows = clusterWordsIntoHorizontalRows(words);
 
     const rawRegions = [];
     let id = 1;
@@ -222,14 +300,27 @@ const LocalOCR = (() => {
       let chunk = [];
       const flush = () => {
         if (!chunk.length) return;
-        const bbox = unionBBox(chunk);
+
+        const reading = wordsToHorizontalReading(chunk);
+        const orderedChunk = reading.words;
+        const bbox = unionBBox(orderedChunk);
+
         rawRegions.push({
           id: `r${id++}`,
-          text: joinWords(chunk.map(w => w.text)),
-          words: chunk.map(w => ({ text: w.text, bbox: { ...w.bbox }, confidence: w.confidence })),
+          text: reading.text,
+          words: orderedChunk.map(w => ({
+            text: w.text,
+            bbox: { ...w.bbox },
+            confidence: w.confidence
+          })),
           bbox,
-          confidence: Math.round(chunk.reduce((s, w) => s + w.confidence, 0) / chunk.length),
-          avgHeight: chunk.reduce((s, w) => s + w.h, 0) / chunk.length
+          confidence: Math.round(
+            orderedChunk.reduce((s, w) => s + w.confidence, 0) /
+            Math.max(1, orderedChunk.length)
+          ),
+          avgHeight: orderedChunk.reduce((s, w) => s + w.h, 0) /
+            Math.max(1, orderedChunk.length),
+          lineCount: reading.rows.length
         });
         chunk = [];
       };
@@ -248,8 +339,34 @@ const LocalOCR = (() => {
       flush();
     }
 
-    // Merge very close fragments that belong to the same visual unit, while never bridging large horizontal gaps.
-    const regions = rawRegions.map(r => ({ ...r, type: "other", autoType: "other", score: 0 }));
+    const regions = rawRegions.map(r => {
+      if (!r.words?.length) {
+        return { ...r, type: "other", autoType: "other", score: 0 };
+      }
+
+      const reading = wordsToHorizontalReading(
+        r.words.map(w => ({
+          ...w,
+          h: bboxHeight(w.bbox),
+          w: bboxWidth(w.bbox)
+        }))
+      );
+
+      return {
+        ...r,
+        text: reading.text,
+        words: reading.words.map(w => ({
+          text: w.text,
+          bbox: { ...w.bbox },
+          confidence: w.confidence
+        })),
+        lineCount: reading.rows.length,
+        type: "other",
+        autoType: "other",
+        score: 0
+      };
+    });
+
     return { regions, width: pageWidth, height: pageHeight, medianHeight: medH };
   }
 
@@ -595,8 +712,8 @@ const LocalOCR = (() => {
     const visual = sortedByVisual(regions, orientation);
     const companyR = choose(visual, "company");
     const nameR = choose(visual, "name");
-    const dept = visual.filter(r => r.type === "department").map(r => r.text).join(" ").trim();
-    const pos = visual.filter(r => r.type === "position").map(r => r.text).join(" ").trim();
+    const dept = compactJapaneseSpaces(visual.filter(r => r.type === "department").map(r => r.text).join(""));
+    const pos = compactJapaneseSpaces(visual.filter(r => r.type === "position").map(r => r.text).join(""));
     const addressRegs = visual.filter(r => r.type === "address");
     const addressText = addressRegs.map(r => r.text).join(" ").trim();
     const postal = (addressText.match(RX.postal) || [""])[0].replace(/^〒\s*/, "").replace(/[‐‑‒–—―ー]/g, "-").replace(/\s+/g, "");
@@ -744,6 +861,6 @@ const LocalOCR = (() => {
   }
 
   return {
-    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, terminate, FILES, CORE_BASES, TYPES
+    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, wordsToHorizontalReading, terminate, FILES, CORE_BASES, TYPES
   };
 })();
