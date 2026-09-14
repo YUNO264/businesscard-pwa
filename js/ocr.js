@@ -284,11 +284,20 @@ const LocalOCR = (() => {
   }
 
 
-  // Split a visual group when the OCR bounding-box size changes clearly.
-  // Use the current group's MEDIAN size instead of the previous token so
-  // one unusually tall/short glyph does not cause cascading splits.
-  const FONT_SIZE_SPLIT_RATIO = 1.35;
-  const FONT_SIZE_SPLIT_MIN_PX = 4;
+  // Font-size grouping.
+  //
+  // Japanese OCR bounding boxes fluctuate strongly for short tokens such as
+  // "車" and "社". Splitting on a single token therefore causes company names
+  // such as "トヨタ自動車株式会社" to be fragmented.
+  //
+  // v4.3.7 rule:
+  //  - A moderate size change must continue for at least TWO consecutive OCR tokens.
+  //  - A single token only triggers a split when the size change is extreme.
+  //  - One-character Japanese tokens are treated as especially unreliable.
+  const FONT_SIZE_PERSIST_RATIO = 1.38;
+  const FONT_SIZE_PERSIST_MIN_PX = 4;
+  const FONT_SIZE_SINGLE_STRONG_RATIO = 1.85;
+  const FONT_SIZE_SINGLE_STRONG_MIN_PX = 8;
 
   function horizontalFontSize(word) {
     return Math.max(1, word.h || bboxHeight(word.bbox));
@@ -298,19 +307,106 @@ const LocalOCR = (() => {
     return Math.max(1, word.w || bboxWidth(word.bbox));
   }
 
-  function shouldSplitByFontSize(chunk, nextWord, orientation = "horizontal") {
-    if (!chunk?.length || !nextWord) return false;
+  function normalizedTokenText(word) {
+    return compactJapaneseSpaces(word?.text || "");
+  }
+
+  function isShortJapaneseToken(word) {
+    const t = normalizedTokenText(word);
+    return /^[一-龥々〆ヵヶぁ-んァ-ヶー]{1,2}$/.test(t);
+  }
+
+  function sizeChangeFromBase(base, value, ratioLimit, diffLimit) {
+    const ratio = Math.max(base, value) / Math.max(1, Math.min(base, value));
+    const diff = Math.abs(base - value);
+    return ratio >= ratioLimit && diff >= diffLimit;
+  }
+
+  function sameSizeDirection(base, a, b) {
+    return (a < base && b < base) || (a > base && b > base);
+  }
+
+  function shouldSplitByFontSizeSequence(
+    chunk,
+    sequence,
+    index,
+    orientation = "horizontal"
+  ) {
+    if (!chunk?.length || !sequence?.[index]) return false;
 
     const metric = orientation === "vertical" ? verticalFontSize : horizontalFontSize;
     const sizes = chunk.map(metric).filter(Number.isFinite);
     if (!sizes.length) return false;
 
     const base = Math.max(1, median(sizes));
-    const next = Math.max(1, metric(nextWord));
-    const ratio = Math.max(base, next) / Math.max(1, Math.min(base, next));
-    const diff = Math.abs(base - next);
+    const currentWord = sequence[index];
+    const current = Math.max(1, metric(currentWord));
 
-    return ratio >= FONT_SIZE_SPLIT_RATIO && diff >= FONT_SIZE_SPLIT_MIN_PX;
+    const moderate = sizeChangeFromBase(
+      base,
+      current,
+      FONT_SIZE_PERSIST_RATIO,
+      FONT_SIZE_PERSIST_MIN_PX
+    );
+
+    if (!moderate) return false;
+
+    // Extremely large changes may represent a true heading/body boundary even
+    // when only one OCR token follows. Keep a higher threshold for short
+    // Japanese tokens because their bbox height is unstable.
+    const strongRatio = isShortJapaneseToken(currentWord)
+      ? 2.05
+      : FONT_SIZE_SINGLE_STRONG_RATIO;
+
+    if (
+      sizeChangeFromBase(
+        base,
+        current,
+        strongRatio,
+        FONT_SIZE_SINGLE_STRONG_MIN_PX
+      )
+    ) {
+      return true;
+    }
+
+    // Moderate difference: require the NEXT token to show the same size regime.
+    const followingWord = sequence[index + 1];
+    if (!followingWord) return false;
+
+    const following = Math.max(1, metric(followingWord));
+    const followingChanged = sizeChangeFromBase(
+      base,
+      following,
+      FONT_SIZE_PERSIST_RATIO,
+      FONT_SIZE_PERSIST_MIN_PX
+    );
+
+    if (!followingChanged) return false;
+    if (!sameSizeDirection(base, current, following)) return false;
+
+    // If both current and following tokens are very short Japanese fragments,
+    // require one more confirmation when available.
+    if (isShortJapaneseToken(currentWord) && isShortJapaneseToken(followingWord)) {
+      const thirdWord = sequence[index + 2];
+      if (!thirdWord) return false;
+
+      const third = Math.max(1, metric(thirdWord));
+      const thirdChanged = sizeChangeFromBase(
+        base,
+        third,
+        FONT_SIZE_PERSIST_RATIO,
+        FONT_SIZE_PERSIST_MIN_PX
+      );
+
+      return thirdChanged && sameSizeDirection(base, current, third);
+    }
+
+    return true;
+  }
+
+  // Backward-compatible helper used by older diagnostics/tests.
+  function shouldSplitByFontSize(chunk, nextWord, orientation = "horizontal") {
+    return shouldSplitByFontSizeSequence(chunk, [nextWord], 0, orientation);
   }
 
   function groupWordsHorizontal(words) {
@@ -355,7 +451,8 @@ const LocalOCR = (() => {
         chunk = [];
       };
 
-      for (const word of rowWords) {
+      for (let wordIndex = 0; wordIndex < rowWords.length; wordIndex++) {
+        const word = rowWords[wordIndex];
         if (!chunk.length) { chunk.push(word); continue; }
         const prev = chunk[chunk.length - 1];
         const gap = word.bbox.x0 - prev.bbox.x1;
@@ -363,7 +460,7 @@ const LocalOCR = (() => {
         const hard = isHardBoundary(word.text, currentText);
         const gapLimit = Math.max(rowMedH * 2.25, pageWidth * 0.045, 30);
         const semanticGap = Math.max(rowMedH * 0.45, 8);
-        const fontSizeChanged = shouldSplitByFontSize(chunk, word, "horizontal");
+        const fontSizeChanged = shouldSplitByFontSizeSequence(chunk, rowWords, wordIndex, "horizontal");
 
         if (
           gap > gapLimit ||
@@ -464,7 +561,8 @@ const LocalOCR = (() => {
         chunk = [];
       };
 
-      for (const word of colWords) {
+      for (let wordIndex = 0; wordIndex < colWords.length; wordIndex++) {
+        const word = colWords[wordIndex];
         if (!chunk.length) {
           chunk.push(word);
           continue;
@@ -472,7 +570,7 @@ const LocalOCR = (() => {
         const prev = chunk[chunk.length - 1];
         const gap = word.bbox.y0 - prev.bbox.y1;
         const gapLimit = Math.max(colMedW * 2.2, pageHeight * 0.040, 28);
-        const fontSizeChanged = shouldSplitByFontSize(chunk, word, "vertical");
+        const fontSizeChanged = shouldSplitByFontSizeSequence(chunk, colWords, wordIndex, "vertical");
 
         if (gap > gapLimit || fontSizeChanged) {
           flush();
@@ -905,6 +1003,6 @@ const LocalOCR = (() => {
   }
 
   return {
-    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, wordsToHorizontalReading, shouldSplitByFontSize, terminate, FILES, CORE_BASES, TYPES
+    selfCheck, recognizeLayout, extract, fieldsFromRegions, sortedByVisual, sortedByVisualHorizontal, sortedByVisualVertical, wordsToHorizontalReading, shouldSplitByFontSize, shouldSplitByFontSizeSequence, terminate, FILES, CORE_BASES, TYPES
   };
 })();
